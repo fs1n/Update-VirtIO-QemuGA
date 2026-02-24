@@ -42,7 +42,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.0
+    Version           : 0.2.2
     Author            : Frederik S. (fs1n)
     License           : MIT License
 
@@ -57,6 +57,8 @@ param(
     [switch]$AutoReboot,
     [switch]$SkipHashCheck
 )
+
+$ScriptVersion = "0.2.2"
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -109,6 +111,7 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 }
 
 # Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
+# Previously it was one file per day, but this was realy enoying. A ToDo if this ever turn out to be a problem would be purging old log files.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
@@ -215,15 +218,14 @@ function Get-VirtIOComparableVersion {
 
     if ([string]::IsNullOrWhiteSpace($VersionString)) { return $null }
 
-    $normalized = $VersionString.Trim()
-    $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})(?:-(?<Release>\d+))?$')
+    # Strip optional "-<Release>" suffix (e.g. "0.1.285-1" -> "0.1.285") before comparing.
+    # The Windows installer only reports the Core version, so comparing Core vs. Core is correct.
+    # Else this causes issues with the version Compairison.
+    $normalized = $VersionString.Trim() -replace '-\d+$', ''
+    $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})$')
     if (-not $match.Success) { return $null }
 
-    $core = $match.Groups['Core'].Value
-    if ($match.Groups['Release'].Success) {
-        return [version]("$core.$($match.Groups['Release'].Value)")
-    }
-    return [version]$core
+    return [version]$match.Groups['Core'].Value
 }
 
 function Get-QemuGALocalComparableVersion {
@@ -250,7 +252,16 @@ function Get-QemuGARemoteComparableVersion {
     )
 
     if ($null -eq $Metadata) { return $null }
-    return [version]("$($Metadata.SortCore1).$($Metadata.SortCore2).$($Metadata.SortCore3).$($Metadata.SortCore4)")
+
+    # Parse Core string directly (e.g. "110.0.2") instead of rebuilding from SortCore fields.
+    # Rebuilding always produces a 4-part version (e.g. "110.0.2.0"), but PowerShell's [version]
+    # treats a missing 4th component as -1, so [version]"110.0.2" -ge [version]"110.0.2.0" = $false.
+    # Parsing the original Core string preserves the correct component count for a fair comparison.
+    try {
+        return [version]$Metadata.Core
+    } catch {
+        return $null
+    }
 }
 
 function Confirm-FileHash {
@@ -391,7 +402,7 @@ function Install-MsiPackage {
 
 #Region Script
 
-Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v0.2.0 started ===" -Level "Info"
+Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v$ScriptVersion started ===" -Level "Info"
 
 if (-not $Force) {
     $confirm = Read-Host "Should the VirtIO drivers and the QEMU Guest Agent be updated? (y/N)"
@@ -652,6 +663,8 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
     Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
     $confirmVioSCSI = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
     if ($confirmVioSCSI -match "^[Yy]") {
+        # Credit: vioscsi dummy device installer by croit
+        # https://github.com/croit/load-virtio-scsi-on-boot
         $dummyInstallerURL  = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
         $dummyScriptPath    = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
 
