@@ -40,6 +40,8 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
 ```
 
+### To find all possibilites look at the script header!
+
 ---
 
 ## Parameters
@@ -49,6 +51,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
 | `-Force` | Skips the initial confirmation prompt |
 | `-AutoCleanup` | Deletes downloaded MSI files after installation without prompting |
 | `-AutoReboot` | Reboots automatically if required (exit code 3010), without prompting |
+| `-InstallVioSCSI` | Automatically installs the vioscsi dummy device without prompting |
 
 ---
 

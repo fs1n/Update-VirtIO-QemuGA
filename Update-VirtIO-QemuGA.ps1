@@ -9,6 +9,7 @@
 
     The script is designed to be PowerShell 5.1 and PowerShell 7 compatible.
     Use -Force, -AutoCleanup, and -AutoReboot for non-interactive / automated execution.
+    Use -InstallVioSCSI to automatically install the vioscsi dummy device (e.g. from an RMM tool).
 
 .PARAMETER Force
     Skips the initial confirmation prompt and runs non-interactively.
@@ -19,13 +20,22 @@
 .PARAMETER AutoReboot
     Automatically reboots the system after installation if required (ExitCode 3010), without prompting.
 
+.PARAMETER InstallVioSCSI
+    Automatically installs the vioscsi dummy device without prompting.
+    Use this switch when running from an RMM tool or other automated context.
+    Has no effect if a vioscsi device is already present.
+
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1
     Runs the script interactively, downloads the latest VirtIO MSI, installs it, and prompts for cleanup.
 
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot
-    Fully automated run: no prompts, cleans up MSI files, reboots if needed.
+    Fully automated run: no prompts, cleans up MSI files, reboots if needed. Skips vioscsi check.
+
+.EXAMPLE
+    .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot -InstallVioSCSI
+    Fully automated run including vioscsi dummy device installation.
 
 .EXAMPLE
     powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1 -Force
@@ -39,7 +49,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.3
+    Version           : 0.2.4
     Author            : Frederik S. (fs1n)
     License           : MIT License
 
@@ -51,10 +61,11 @@
 param(
     [switch]$Force,
     [switch]$AutoCleanup,
-    [switch]$AutoReboot
+    [switch]$AutoReboot,
+    [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "0.2.3"
+$ScriptVersion = "0.2.4"
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -107,7 +118,6 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 }
 
 # Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
-# Previously it was one file per day, but this was realy enoying. A ToDo if this ever turn out to be a problem would be purging old log files.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
@@ -216,7 +226,6 @@ function Get-VirtIOComparableVersion {
 
     # Strip optional "-<Release>" suffix (e.g. "0.1.285-1" -> "0.1.285") before comparing.
     # The Windows installer only reports the Core version, so comparing Core vs. Core is correct.
-    # Else this causes issues with the version Compairison.
     $normalized = $VersionString.Trim() -replace '-\d+$', ''
     $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})$')
     if (-not $match.Success) { return $null }
@@ -597,9 +606,15 @@ if ($script:RebootRequired) {
 
 # --- vioscsi dummy device check (Proxmox VE migration preparation) ---
 if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
-    Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
-    $confirmVioSCSI = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
-    if ($confirmVioSCSI -match "^[Yy]") {
+    # Determine whether to install: honour -InstallVioSCSI switch, otherwise prompt (unless -Force suppresses all prompts)
+    $doInstallVioSCSI = $InstallVioSCSI.IsPresent
+    if (-not $Force -and -not $doInstallVioSCSI) {
+        Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
+        $confirmVioSCSI   = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
+        $doInstallVioSCSI = $confirmVioSCSI -match "^[Yy]"
+    }
+
+    if ($doInstallVioSCSI) {
         # Credit: vioscsi dummy device installer by croit
         # https://github.com/croit/load-virtio-scsi-on-boot
         $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
@@ -623,6 +638,9 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
             Write-Log -Message "Failed to execute vioscsi dummy installer. Error: $_" -Level "Error"
             exit 1
         }
+    }
+    else {
+        Write-Log -Message "vioscsi device not found. Skipping dummy device installation." -Level "Info"
     }
 }
 else {
