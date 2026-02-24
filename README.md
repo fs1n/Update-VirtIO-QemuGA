@@ -10,7 +10,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 - Resolves and downloads the latest MSI from the Fedora People Archive
 - Silent MSI installation with prompt for reboot
 - Structured timestamped log file per run
-- Optional SHA256 hash verification (non-fatal if hash file is unavailable) - currently not really working
+- Optional SHA256 hash verification (non-fatal if hash file is unavailable)
 - Checks for a `vioscsi` device and offers to install a dummy device for seamless migration from another hypervisor
 - Compatible with **PowerShell 5.1** and **PowerShell 7**
 - Non-interactive mode for use in scheduled tasks or RMM tools
@@ -51,7 +51,6 @@ powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
 | `-Force` | Skips the initial confirmation prompt |
 | `-AutoCleanup` | Deletes downloaded MSI files after installation without prompting |
 | `-AutoReboot` | Reboots automatically if required (exit code 3010), without prompting |
-| `-SkipHashCheck` | Skips SHA256 verification of downloaded files |
 
 ---
 

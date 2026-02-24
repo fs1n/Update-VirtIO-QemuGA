@@ -4,8 +4,8 @@
 .DESCRIPTION
     This script runs on Windows and automates the update process for VirtIO components sourced from the Fedora People Archive root URL.
     It performs environment validation (OS and administrator rights), checks currently installed versions, resolves the latest available
-    archive version, downloads the MSI package to a temporary working directory, optionally verifies its SHA256 hash, installs it
-    silently, writes structured logs, and optionally cleans up downloaded installer files.
+    archive version, downloads the MSI package to a temporary working directory, installs it silently, writes structured logs, and
+    optionally cleans up downloaded installer files.
 
     The script is designed to be PowerShell 5.1 and PowerShell 7 compatible.
     Use -Force, -AutoCleanup, and -AutoReboot for non-interactive / automated execution.
@@ -18,9 +18,6 @@
 
 .PARAMETER AutoReboot
     Automatically reboots the system after installation if required (ExitCode 3010), without prompting.
-
-.PARAMETER SkipHashCheck
-    Skips the SHA256 hash verification of downloaded MSI files.
 
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1
@@ -42,7 +39,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.2
+    Version           : 0.2.3
     Author            : Frederik S. (fs1n)
     License           : MIT License
 
@@ -54,11 +51,10 @@
 param(
     [switch]$Force,
     [switch]$AutoCleanup,
-    [switch]$AutoReboot,
-    [switch]$SkipHashCheck
+    [switch]$AutoReboot
 )
 
-$ScriptVersion = "0.2.2"
+$ScriptVersion = "0.2.3"
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -264,59 +260,16 @@ function Get-QemuGARemoteComparableVersion {
     }
 }
 
-function Confirm-FileHash {
-    <#
-    .SYNOPSIS
-        Verifies a downloaded file's SHA256 hash against a remote .sha256 file.
-    .PARAMETER FilePath
-        Local path of the downloaded file to verify.
-    .PARAMETER HashFileURL
-        URL of the remote .sha256 file.
-    .OUTPUTS
-        $true if hash matches or verification is skipped, $false on mismatch.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$FilePath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$HashFileURL
-    )
-
-    try {
-        $remoteHashContent = Invoke-WebRequest -Uri $HashFileURL -UseBasicParsing -ErrorAction Stop
-        # SHA256 files typically contain "<hash>  <filename>" or just "<hash>"
-        $expectedHash = ($remoteHashContent.Content -split '\s+')[0].Trim().ToUpper()
-
-        $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToUpper()
-
-        if ($actualHash -eq $expectedHash) {
-            Write-Log -Message "SHA256 hash verified successfully for $(Split-Path $FilePath -Leaf)." -Level "Info"
-            return $true
-        } else {
-            Write-Log -Message "SHA256 hash mismatch for $(Split-Path $FilePath -Leaf)! Expected: $expectedHash | Actual: $actualHash" -Level "Error"
-            return $false
-        }
-    }
-    catch {
-        Write-Log -Message "Could not retrieve or compare hash file at $HashFileURL. Skipping hash check. Error: $_" -Level "Warning"
-        return $true  # Non-fatal: proceed if hash file is unavailable
-    }
-}
-
 function Install-MsiPackage {
     <#
     .SYNOPSIS
-        Downloads, optionally hash-verifies, installs, and optionally cleans up an MSI package.
+        Downloads, installs, and optionally cleans up an MSI package.
     .PARAMETER DisplayName
         Human-readable name used in log messages (e.g. "VirtIO" or "QEMU Guest Agent").
     .PARAMETER MsiFileName
         Filename of the MSI (e.g. "virtio-win-gt-x64.msi").
     .PARAMETER DownloadURL
         Full URL to download the MSI from.
-    .PARAMETER HashFileURL
-        Full URL to the corresponding .sha256 hash file. Optional.
     #>
     [CmdletBinding()]
     param(
@@ -327,10 +280,7 @@ function Install-MsiPackage {
         [string]$MsiFileName,
 
         [Parameter(Mandatory = $true)]
-        [string]$DownloadURL,
-
-        [Parameter(Mandatory = $false)]
-        [string]$HashFileURL
+        [string]$DownloadURL
     )
 
     $localPath = Join-Path -Path $ScriptTempPath -ChildPath $MsiFileName
@@ -345,15 +295,6 @@ function Install-MsiPackage {
     catch {
         Write-Log -Message "Failed to download $MsiFileName. Error: $_" -Level "Error"
         exit 1
-    }
-
-    # --- Hash verification ---
-    if (-not $SkipHashCheck -and -not [string]::IsNullOrWhiteSpace($HashFileURL)) {
-        $hashOk = Confirm-FileHash -FilePath $localPath -HashFileURL $HashFileURL
-        if (-not $hashOk) {
-            Write-Log -Message "Aborting installation of $MsiFileName due to hash mismatch." -Level "Error"
-            exit 1
-        }
     }
 
     # --- Install ---
@@ -534,14 +475,12 @@ if (-not $SkipVirtIO) {
         exit 1
     }
 
-    $VirtIOmsiDownloadURL  = $FPAVirtIOLatestURL + $VirtIOmsiFileName
-    $VirtIOHashFileURL     = $FPAVirtIOLatestURL + "$VirtIOmsiFileName.sha256"
+    $VirtIOmsiDownloadURL = $FPAVirtIOLatestURL + $VirtIOmsiFileName
 
     Install-MsiPackage `
         -DisplayName "VirtIO" `
         -MsiFileName $VirtIOmsiFileName `
-        -DownloadURL $VirtIOmsiDownloadURL `
-        -HashFileURL $VirtIOHashFileURL
+        -DownloadURL $VirtIOmsiDownloadURL
 }
 
 # --- Resolve latest QEMU GA version from FPA ---
@@ -608,7 +547,7 @@ if (-not $SkipQemuGA) {
         exit 1
     }
 
-    $QemuGAMsiLink    = $null
+    $QemuGAMsiLink     = $null
     $QemuGAmsiFileName = $null
     foreach ($msiCandidate in $QemuGAmsiCandidates) {
         $QemuGAMsiLink = $FPAQemuGALatestSite.Links | Where-Object { $_.href -eq $msiCandidate } | Select-Object -First 1
@@ -624,13 +563,11 @@ if (-not $SkipQemuGA) {
     }
 
     $QemuGAmsiDownloadURL = $FPAQemuGALatestURL + $QemuGAmsiFileName
-    $QemuGAHashFileURL    = $FPAQemuGALatestURL + "$QemuGAmsiFileName.sha256"
 
     Install-MsiPackage `
         -DisplayName "QEMU Guest Agent" `
         -MsiFileName $QemuGAmsiFileName `
-        -DownloadURL $QemuGAmsiDownloadURL `
-        -HashFileURL $QemuGAHashFileURL
+        -DownloadURL $QemuGAmsiDownloadURL
 }
 
 # --- Reboot handling ---
@@ -665,8 +602,8 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
     if ($confirmVioSCSI -match "^[Yy]") {
         # Credit: vioscsi dummy device installer by croit
         # https://github.com/croit/load-virtio-scsi-on-boot
-        $dummyInstallerURL  = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
-        $dummyScriptPath    = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
+        $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
+        $dummyScriptPath   = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
 
         Write-Log -Message "Downloading vioscsi dummy installer to: $dummyScriptPath" -Level "Info"
         try {
