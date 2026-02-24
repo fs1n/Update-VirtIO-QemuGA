@@ -1,20 +1,37 @@
 <#
 .SYNOPSIS
-    Updates VirtIO Windows drivers and prepares QEMU Guest Agent update workflow from Fedora People Archive.
+    Updates VirtIO Windows drivers and QEMU Guest Agent from Fedora People Archive.
 .DESCRIPTION
     This script runs on Windows and automates the update process for VirtIO components sourced from the Fedora People Archive root URL.
     It performs environment validation (OS and administrator rights), checks currently installed versions, resolves the latest available
-    archive version, downloads the MSI package to a temporary working directory, installs it silently, writes structured logs, and optionally
-    cleans up downloaded installer files.
+    archive version, downloads the MSI package to a temporary working directory, optionally verifies its SHA256 hash, installs it
+    silently, writes structured logs, and optionally cleans up downloaded installer files.
 
     The script is designed to be PowerShell 5.1 and PowerShell 7 compatible.
+    Use -Force, -AutoCleanup, and -AutoReboot for non-interactive / automated execution.
+
+.PARAMETER Force
+    Skips the initial confirmation prompt and runs non-interactively.
+
+.PARAMETER AutoCleanup
+    Automatically deletes downloaded MSI files after installation without prompting.
+
+.PARAMETER AutoReboot
+    Automatically reboots the system after installation if required (ExitCode 3010), without prompting.
+
+.PARAMETER SkipHashCheck
+    Skips the SHA256 hash verification of downloaded MSI files.
 
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1
     Runs the script interactively, downloads the latest VirtIO MSI, installs it, and prompts for cleanup.
 
 .EXAMPLE
-    powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
+    .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot
+    Fully automated run: no prompts, cleans up MSI files, reboots if needed.
+
+.EXAMPLE
+    powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1 -Force
     Executes the script from Windows PowerShell 5.1 in a controlled invocation context.
 
 .INPUTS
@@ -25,13 +42,21 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.1.0
+    Version           : 0.2.0
     Author            : Frederik S. (fs1n)
     License           : MIT License
 
 .LINK
     TO_BE_REPLACED_DOCUMENTATION_URL
 #>
+
+[CmdletBinding()]
+param(
+    [switch]$Force,
+    [switch]$AutoCleanup,
+    [switch]$AutoReboot,
+    [switch]$SkipHashCheck
+)
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -47,26 +72,27 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 if ($PSVersionTable.PSVersion.Major -le 5) {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    # Use bitwise OR to preserve any already-enabled protocols (e.g. TLS 1.3)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
 
 #Region Variables
 
-# Define Variables
-# FPA Is used as the alias for Fedora People Archive in the script
-$FPARootURL = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads"
-$ArchiveVirtIOURL = "$FPARootURL/archive-virtio/"
-$ArchiveQemuGAURL = "$FPARootURL/archive-qemu-ga/"
+# FPA is used as the alias for Fedora People Archive in the script
+$FPARootURL        = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads"
+$ArchiveVirtIOURL  = "$FPARootURL/archive-virtio/"
+$ArchiveQemuGAURL  = "$FPARootURL/archive-qemu-ga/"
 
 $UninstallRegistryPaths = @(
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
     "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
 )
 
-$VirtIODisplayNamePattern = "*virtio*installer*"
-$VirtIOmsiFileName = "virtio-win-gt-x64.msi"
-$QemuGAFolderPattern = '^qemu-ga-win-(?<Core>\d+(?:\.\d+){0,3})-(?<Release>\d+)(?:\.(?<Dist>[^/]+))?/?$'
-$QemuGAmsiCandidates = @(
+$VirtIODisplayNamePattern  = "*virtio*installer*"
+$QemuGADisplayNamePattern  = "*QEMU Guest Agent*"
+$VirtIOmsiFileName         = "virtio-win-gt-x64.msi"
+$QemuGAFolderPattern       = '^qemu-ga-win-(?<Core>\d+(?:\.\d+){0,3})-(?<Release>\d+)(?:\.(?<Dist>[^/]+))?/?$'
+$QemuGAmsiCandidates       = @(
     "qemu-ga-x86_64.msi",
     "qemu-ga-x64.msi"
 )
@@ -76,11 +102,14 @@ $QemuGAExecutablePaths = @(
 )
 
 $ScriptTempDirName = "Qemu-VirtIO-Update-Temp"
-$ScriptTempPath = Join-Path -Path $env:TEMP -ChildPath $ScriptTempDirName
+$ScriptTempPath    = Join-Path -Path $env:TEMP -ChildPath $ScriptTempDirName
+
 if (-not (Test-Path -Path $ScriptTempPath)) {
     New-Item -Path $ScriptTempPath -ItemType Directory | Out-Null
 }
-$script:LogFilePath = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd').log"
+
+# Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
+$script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
 #EndRegion
@@ -90,49 +119,38 @@ $script:RebootRequired = $false
 function Write-Log {
     <#
     .SYNOPSIS
-        Writes log messages to a file with timestamp and severity level. 
-    
+        Writes log messages to a file with timestamp and severity level.
     .DESCRIPTION
-        Logs script events with Info, Warning, or Error levels using European date/time format (dd. MM.yyyy HH:mm:ss).
-    
+        Logs script events with Info, Warning, or Error levels using European date/time format (dd.MM.yyyy HH:mm:ss).
     .PARAMETER Message
-        The message to log. 
-    
+        The message to log.
     .PARAMETER Level
-        The severity level:  Info, Warning, or Error.  Default is Info.
-    
+        The severity level: Info, Warning, or Error. Default is Info.
     .EXAMPLE
         Write-Log -Message "Script started" -Level Info
         Write-Log -Message "Configuration file not found" -Level Warning
         Write-Log -Message "Database connection failed" -Level Error
     #>
-    
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
-        
+
         [Parameter(Mandatory = $false)]
         [ValidateSet("Info", "Warning", "Error")]
         [string]$Level = "Info"
     )
-    
-    # European date/time format: dd.MM.yyyy HH:mm:ss
+
     $timestamp = Get-Date -Format "dd.MM.yyyy HH:mm:ss"
-    
-    # Format the log entry
-    $logEntry = "$timestamp [$Level] $Message"
-    
-    # Ensure log file exists
+    $logEntry  = "$timestamp [$Level] $Message"
+
     if (-not (Test-Path -Path $script:LogFilePath)) {
         New-Item -Path $script:LogFilePath -ItemType File -Force | Out-Null
         Add-Content -Path $script:LogFilePath -Value "=== Log initialized on $(Get-Date -Format 'dd.MM.yyyy HH:mm:ss') ==="
     }
-    
-    # Write to log file
+
     Add-Content -Path $script:LogFilePath -Value $logEntry
-    
-    # Also output to console with color coding
+
     switch ($Level) {
         "Info"    { Write-Host $logEntry -ForegroundColor Green }
         "Warning" { Write-Host $logEntry -ForegroundColor Yellow }
@@ -148,24 +166,19 @@ function Get-QemuGAFolderMetadata {
     )
 
     $match = [regex]::Match($Href, $QemuGAFolderPattern)
-    if (-not $match.Success) {
-        return $null
-    }
+    if (-not $match.Success) { return $null }
 
-    $coreRaw = $match.Groups['Core'].Value
+    $coreRaw   = $match.Groups['Core'].Value
     $coreParts = $coreRaw.Split('.')
-    $core1 = 0
-    $core2 = 0
-    $core3 = 0
-    $core4 = 0
+    $core1 = 0; $core2 = 0; $core3 = 0; $core4 = 0
 
     if ($coreParts.Count -ge 1) { $core1 = [int]$coreParts[0] }
     if ($coreParts.Count -ge 2) { $core2 = [int]$coreParts[1] }
     if ($coreParts.Count -ge 3) { $core3 = [int]$coreParts[2] }
     if ($coreParts.Count -ge 4) { $core4 = [int]$coreParts[3] }
 
-    $release = [int]$match.Groups['Release'].Value
-    $distRaw = $match.Groups['Dist'].Value
+    $release   = [int]$match.Groups['Release'].Value
+    $distRaw   = $match.Groups['Dist'].Value
     $distMajor = 0
     $distMinor = 0
 
@@ -200,21 +213,16 @@ function Get-VirtIOComparableVersion {
         [string]$VersionString
     )
 
-    if ([string]::IsNullOrWhiteSpace($VersionString)) {
-        return $null
-    }
+    if ([string]::IsNullOrWhiteSpace($VersionString)) { return $null }
 
     $normalized = $VersionString.Trim()
     $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})(?:-(?<Release>\d+))?$')
-    if (-not $match.Success) {
-        return $null
-    }
+    if (-not $match.Success) { return $null }
 
     $core = $match.Groups['Core'].Value
     if ($match.Groups['Release'].Success) {
         return [version]("$core.$($match.Groups['Release'].Value)")
     }
-
     return [version]$core
 }
 
@@ -225,15 +233,11 @@ function Get-QemuGALocalComparableVersion {
         [string]$VersionString
     )
 
-    if ([string]::IsNullOrWhiteSpace($VersionString)) {
-        return $null
-    }
+    if ([string]::IsNullOrWhiteSpace($VersionString)) { return $null }
 
     $normalized = $VersionString.Trim()
     $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})$')
-    if (-not $match.Success) {
-        return $null
-    }
+    if (-not $match.Success) { return $null }
 
     return [version]$match.Groups['Core'].Value
 }
@@ -245,28 +249,162 @@ function Get-QemuGARemoteComparableVersion {
         [psobject]$Metadata
     )
 
-    if ($null -eq $Metadata) {
-        return $null
+    if ($null -eq $Metadata) { return $null }
+    return [version]("$($Metadata.SortCore1).$($Metadata.SortCore2).$($Metadata.SortCore3).$($Metadata.SortCore4)")
+}
+
+function Confirm-FileHash {
+    <#
+    .SYNOPSIS
+        Verifies a downloaded file's SHA256 hash against a remote .sha256 file.
+    .PARAMETER FilePath
+        Local path of the downloaded file to verify.
+    .PARAMETER HashFileURL
+        URL of the remote .sha256 file.
+    .OUTPUTS
+        $true if hash matches or verification is skipped, $false on mismatch.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$HashFileURL
+    )
+
+    try {
+        $remoteHashContent = Invoke-WebRequest -Uri $HashFileURL -UseBasicParsing -ErrorAction Stop
+        # SHA256 files typically contain "<hash>  <filename>" or just "<hash>"
+        $expectedHash = ($remoteHashContent.Content -split '\s+')[0].Trim().ToUpper()
+
+        $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToUpper()
+
+        if ($actualHash -eq $expectedHash) {
+            Write-Log -Message "SHA256 hash verified successfully for $(Split-Path $FilePath -Leaf)." -Level "Info"
+            return $true
+        } else {
+            Write-Log -Message "SHA256 hash mismatch for $(Split-Path $FilePath -Leaf)! Expected: $expectedHash | Actual: $actualHash" -Level "Error"
+            return $false
+        }
+    }
+    catch {
+        Write-Log -Message "Could not retrieve or compare hash file at $HashFileURL. Skipping hash check. Error: $_" -Level "Warning"
+        return $true  # Non-fatal: proceed if hash file is unavailable
+    }
+}
+
+function Install-MsiPackage {
+    <#
+    .SYNOPSIS
+        Downloads, optionally hash-verifies, installs, and optionally cleans up an MSI package.
+    .PARAMETER DisplayName
+        Human-readable name used in log messages (e.g. "VirtIO" or "QEMU Guest Agent").
+    .PARAMETER MsiFileName
+        Filename of the MSI (e.g. "virtio-win-gt-x64.msi").
+    .PARAMETER DownloadURL
+        Full URL to download the MSI from.
+    .PARAMETER HashFileURL
+        Full URL to the corresponding .sha256 hash file. Optional.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$MsiFileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DownloadURL,
+
+        [Parameter(Mandatory = $false)]
+        [string]$HashFileURL
+    )
+
+    $localPath = Join-Path -Path $ScriptTempPath -ChildPath $MsiFileName
+
+    # --- Download ---
+    Write-Log -Message "$DisplayName download URL: $DownloadURL" -Level "Info"
+    Write-Log -Message "Starting $DisplayName download to: $ScriptTempPath" -Level "Info"
+    try {
+        Invoke-WebRequest -Uri $DownloadURL -OutFile $localPath -UseBasicParsing -ErrorAction Stop
+        Write-Log -Message "Successfully downloaded $MsiFileName" -Level "Info"
+    }
+    catch {
+        Write-Log -Message "Failed to download $MsiFileName. Error: $_" -Level "Error"
+        exit 1
     }
 
-    return [version]("$($Metadata.SortCore1).$($Metadata.SortCore2).$($Metadata.SortCore3).$($Metadata.SortCore4)")
+    # --- Hash verification ---
+    if (-not $SkipHashCheck -and -not [string]::IsNullOrWhiteSpace($HashFileURL)) {
+        $hashOk = Confirm-FileHash -FilePath $localPath -HashFileURL $HashFileURL
+        if (-not $hashOk) {
+            Write-Log -Message "Aborting installation of $MsiFileName due to hash mismatch." -Level "Error"
+            exit 1
+        }
+    }
+
+    # --- Install ---
+    Write-Log -Message "Starting installation of $MsiFileName" -Level "Info"
+    try {
+        $installProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$localPath`" /qn /norestart" -Wait -PassThru -ErrorAction Stop
+        if ($installProcess.ExitCode -in 0, 3010) {
+            Write-Log -Message "Successfully installed $MsiFileName" -Level "Info"
+            if ($installProcess.ExitCode -eq 3010) {
+                $script:RebootRequired = $true
+                Write-Log -Message "$DisplayName installation requires a reboot (ExitCode 3010)." -Level "Warning"
+            }
+        }
+        else {
+            Write-Log -Message "Installation of $MsiFileName failed with exit code $($installProcess.ExitCode)" -Level "Error"
+            exit 1
+        }
+    }
+    catch {
+        Write-Log -Message "Failed to install $MsiFileName. Error: $_" -Level "Error"
+        exit 1
+    }
+
+    # --- Cleanup ---
+    $doCleanup = $AutoCleanup
+    if (-not $doCleanup) {
+        $cleanupAnswer = Read-Host "Should the downloaded MSI file be deleted? (y/N)"
+        $doCleanup = $cleanupAnswer -match "^[Yy]"
+    }
+
+    if ($doCleanup) {
+        try {
+            Remove-Item -Path $localPath -Force -ErrorAction Stop
+            Write-Log -Message "Deleted downloaded MSI file: $localPath" -Level "Info"
+        }
+        catch {
+            Write-Log -Message "Failed to delete downloaded MSI file: $localPath. Error: $_" -Level "Warning"
+        }
+    }
+    else {
+        Write-Log -Message "Downloaded MSI file retained at: $localPath" -Level "Info"
+    }
 }
 
 #EndRegion
 
 #Region Script
 
-$confirm = Read-Host "Should the virtIO-Drivers and the QEMU Guest Agent be updated? (y/N)"
-if ($confirm -notmatch "^[Yy]") {
-    Write-Host "Script Canceled." -ForegroundColor Yellow
-    exit 0
+Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v0.2.0 started ===" -Level "Info"
+
+if (-not $Force) {
+    $confirm = Read-Host "Should the VirtIO drivers and the QEMU Guest Agent be updated? (y/N)"
+    if ($confirm -notmatch "^[Yy]") {
+        Write-Host "Script canceled." -ForegroundColor Yellow
+        exit 0
+    }
 }
 
 $SkipVirtIO = $false
 $SkipQemuGA = $false
 
-# Test if VirtIO Drivers are installed and get the current version
-# Needed to then compare with latest version -> Override option to force reinstall will be added at some point. (ToDo)
+# --- Detect installed VirtIO version (Registry) ---
 try {
     $VirtIOCurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
         Where-Object { $_.DisplayName -and $_.DisplayName -like $VirtIODisplayNamePattern } |
@@ -274,7 +412,8 @@ try {
 
     if ([string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
         Write-Log -Message "VirtIO not installed (no matching registry entry found)." -Level "Warning"
-    } else {
+    }
+    else {
         Write-Log -Message "Detected VirtIO version: $VirtIOCurrentVersion" -Level "Info"
     }
 }
@@ -282,20 +421,30 @@ catch {
     Write-Log -Message "Unable to retrieve VirtIO version: $_" -Level "Warning"
 }
 
-# Test if QEMU Guest Agent is installed and get current version
+# --- Detect installed QEMU Guest Agent version (Registry preferred, executable fallback) ---
 try {
     $QemuGACurrentVersion = $null
 
-    foreach ($path in $QemuGAExecutablePaths) {
-        if (Test-Path -Path $path) {
-            $QemuGACurrentVersion = (Get-Item -Path $path -ErrorAction Stop).VersionInfo.FileVersion
-            break
+    # Primary: Registry lookup (consistent with VirtIO detection)
+    $QemuGACurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and $_.DisplayName -like $QemuGADisplayNamePattern } |
+        Select-Object -ExpandProperty DisplayVersion -First 1
+
+    # Fallback: executable file version
+    if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
+        foreach ($path in $QemuGAExecutablePaths) {
+            if (Test-Path -Path $path) {
+                $QemuGACurrentVersion = (Get-Item -Path $path -ErrorAction Stop).VersionInfo.FileVersion
+                Write-Log -Message "QEMU Guest Agent version resolved via executable fallback." -Level "Info"
+                break
+            }
         }
     }
 
     if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-        Write-Log -Message "QEMU Guest Agent not installed (qemu-ga.exe not found)." -Level "Warning"
-    } else {
+        Write-Log -Message "QEMU Guest Agent not installed (no registry entry or executable found)." -Level "Warning"
+    }
+    else {
         Write-Log -Message "Detected QEMU Guest Agent version: $QemuGACurrentVersion" -Level "Info"
     }
 }
@@ -303,9 +452,9 @@ catch {
     Write-Log -Message "Unable to retrieve QEMU Guest Agent version: $_" -Level "Warning"
 }
 
-# Access the Fedora People Archive to find the latest virtio-win version
+# --- Resolve latest VirtIO version from FPA ---
 try {
-    $FPAVirtIORootSite = Invoke-WebRequest -Uri $ArchiveVirtIOURL -UseBasicParsing
+    $FPAVirtIORootSite = Invoke-WebRequest -Uri $ArchiveVirtIOURL -UseBasicParsing -ErrorAction Stop
 }
 catch {
     Write-Log -Message "Failed to access Fedora People Archive at $ArchiveVirtIOURL. Error: $_" -Level "Error"
@@ -318,117 +467,75 @@ if ($FPAVirtIORootSite.StatusCode -ne 200) {
 }
 Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveVirtIOURL" -Level "Info"
 
-$FPAVirtIOdirectoryLinks = $FPAVirtIORootSite.Links |
+$FPAVirtIODirectoryLinks = $FPAVirtIORootSite.Links |
     Where-Object { $_.href -match 'virtio-win-[\d\.]+-\d+/?$' } |
     ForEach-Object {
         $ver = [regex]::Match($_.href, 'virtio-win-([\d\.]+-\d+)').Groups[1].Value
         [PSCustomObject]@{ Href = $_.href; Version = $ver }
     }
 
-$latest = $FPAVirtIOdirectoryLinks |
+$VirtIOLatest = $FPAVirtIODirectoryLinks |
     Sort-Object { [version]($_.Version -replace '-', '.') } -Descending |
     Select-Object -First 1
 
-if ($null -eq $latest) {
+if ($null -eq $VirtIOLatest) {
     Write-Log -Message "No matching virtio-win version folders found in $ArchiveVirtIOURL" -Level "Error"
     exit 1
 }
 
 if (-not [string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
-    $VirtIOLocalComparableVersion = Get-VirtIOComparableVersion -VersionString $VirtIOCurrentVersion
-    $VirtIORemoteComparableVersion = Get-VirtIOComparableVersion -VersionString $latest.Version
+    $VirtIOLocalComparableVersion  = Get-VirtIOComparableVersion -VersionString $VirtIOCurrentVersion
+    $VirtIORemoteComparableVersion = Get-VirtIOComparableVersion -VersionString $VirtIOLatest.Version
 
     if ($null -eq $VirtIOLocalComparableVersion -or $null -eq $VirtIORemoteComparableVersion) {
-        Write-Log -Message "VirtIO version format is incompatible for comparison (local='$VirtIOCurrentVersion', remote='$($latest.Version)'). VirtIO update will be skipped." -Level "Error"
+        Write-Log -Message "VirtIO version format is incompatible for comparison (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)'). VirtIO update will be skipped." -Level "Error"
         $SkipVirtIO = $true
     }
     elseif ($VirtIOLocalComparableVersion -ge $VirtIORemoteComparableVersion) {
-        Write-Log -Message "VirtIO is already up to date or newer (local='$VirtIOCurrentVersion', remote='$($latest.Version)'). Skipping VirtIO installation." -Level "Info"
+        Write-Log -Message "VirtIO is already up to date or newer (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)'). Skipping VirtIO installation." -Level "Info"
         $SkipVirtIO = $true
     }
     else {
-        Write-Log -Message "VirtIO update required (local='$VirtIOCurrentVersion', remote='$($latest.Version)')." -Level "Info"
+        Write-Log -Message "VirtIO update required (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)')." -Level "Info"
     }
 }
 
 if (-not $SkipVirtIO) {
-    $FPAVirtIOlatestURL = ([Uri]::new([Uri]$ArchiveVirtIOURL, $latest.Href)).AbsoluteUri
-    if (-not $FPAVirtIOlatestURL.EndsWith('/')) {
-        $FPAVirtIOlatestURL += '/'
-    }
+    $FPAVirtIOLatestURL = ([Uri]::new([Uri]$ArchiveVirtIOURL, $VirtIOLatest.Href)).AbsoluteUri
+    if (-not $FPAVirtIOLatestURL.EndsWith('/')) { $FPAVirtIOLatestURL += '/' }
 
     try {
-        $FPAVirtIOlatestSite = Invoke-WebRequest -Uri $FPAVirtIOlatestURL -UseBasicParsing
+        $FPAVirtIOLatestSite = Invoke-WebRequest -Uri $FPAVirtIOLatestURL -UseBasicParsing -ErrorAction Stop
     }
     catch {
-        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOlatestURL. Error: $_" -Level "Error"
+        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOLatestURL. Error: $_" -Level "Error"
         exit 1
     }
 
-    if ($FPAVirtIOlatestSite.StatusCode -ne 200) {
-        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOlatestURL. Status Code: $($FPAVirtIOlatestSite.StatusCode)" -Level "Error"
+    if ($FPAVirtIOLatestSite.StatusCode -ne 200) {
+        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOLatestURL. Status Code: $($FPAVirtIOLatestSite.StatusCode)" -Level "Error"
         exit 1
     }
 
-    $VirtIOmsiLocalPath = Join-Path -Path $ScriptTempPath -ChildPath $VirtIOmsiFileName 
-
-    $VirtIOmsiLink = $FPAVirtIOlatestSite.Links | Where-Object { $_.href -eq $VirtIOmsiFileName } | Select-Object -First 1
-
+    $VirtIOmsiLink = $FPAVirtIOLatestSite.Links | Where-Object { $_.href -eq $VirtIOmsiFileName } | Select-Object -First 1
     if ($null -eq $VirtIOmsiLink) {
         Write-Log -Message "Could not find $VirtIOmsiFileName in the latest directory." -Level "Error"
         exit 1
     }
 
-    # Construct the full download URL
-    $VirtIOmsiDownloadURL = $FPAVirtIOlatestURL + $VirtIOmsiFileName
-    Write-Log -Message "Download URL: $VirtIOmsiDownloadURL" -Level "Info"
+    $VirtIOmsiDownloadURL  = $FPAVirtIOLatestURL + $VirtIOmsiFileName
+    $VirtIOHashFileURL     = $FPAVirtIOLatestURL + "$VirtIOmsiFileName.sha256"
 
-    # Start download
-    Write-Log -Message "Starting download to: $ScriptTempPath" -Level "Info"
-
-    try {
-        Invoke-WebRequest -Uri $VirtIOmsiDownloadURL -OutFile $VirtIOmsiLocalPath -UseBasicParsing
-        Write-Log -Message "Successfully downloaded $VirtIOmsiFileName" -Level "Info"
-    } catch {
-        Write-Log -Message "Failed to download $VirtIOmsiFileName. Error: $_" -Level "Error"
-        exit 1
-    }
-
-    # Install the MSI
-    Write-Log -Message "Starting installation of $VirtIOmsiFileName" -Level "Info"
-    try {
-        $installProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$VirtIOmsiLocalPath`" /qn /norestart" -Wait -PassThru
-        if ($installProcess.ExitCode -in 0, 3010) {
-            Write-Log -Message "Successfully installed $VirtIOmsiFileName" -Level "Info"
-            if ($installProcess.ExitCode -eq 3010) {
-                $script:RebootRequired = $true
-                Write-Log -Message "VirtIO installation requires a reboot (ExitCode 3010)." -Level "Warning"
-            }
-        } else {
-            Write-Log -Message "Installation of $VirtIOmsiFileName failed with exit code $($installProcess.ExitCode)" -Level "Error"
-            exit 1
-        }
-    } catch {
-        Write-Log -Message "Failed to install $VirtIOmsiFileName. Error: $_" -Level "Error"
-        exit 1
-    }
-
-    $CleanupConfirm = Read-Host "Should the downloaded MSI file be deleted? (y/N)"
-    if ($CleanupConfirm -match "^[Yy]") {
-        try {
-            Remove-Item -Path $VirtIOmsiLocalPath -Force
-            Write-Log -Message "Deleted downloaded MSI file: $VirtIOmsiLocalPath" -Level "Info"
-        } catch {
-            Write-Log -Message "Failed to delete downloaded MSI file: $VirtIOmsiLocalPath. Error: $_" -Level "Warning"
-        }
-    } else {
-        Write-Log -Message "Downloaded MSI file retained at: $VirtIOmsiLocalPath" -Level "Info"
-    }
+    Install-MsiPackage `
+        -DisplayName "VirtIO" `
+        -MsiFileName $VirtIOmsiFileName `
+        -DownloadURL $VirtIOmsiDownloadURL `
+        -HashFileURL $VirtIOHashFileURL
 }
 
-# Access the Fedora People Archive to find the latest qemu-ga version
+# --- Resolve latest QEMU GA version from FPA ---
 try {
-    $FPAQemuGARootSite = Invoke-WebRequest -Uri $ArchiveQemuGAURL -UseBasicParsing
+    $FPAQemuGARootSite = Invoke-WebRequest -Uri $ArchiveQemuGAURL -UseBasicParsing -ErrorAction Stop
 }
 catch {
     Write-Log -Message "Failed to access Fedora People Archive at $ArchiveQemuGAURL. Error: $_" -Level "Error"
@@ -442,9 +549,7 @@ if ($FPAQemuGARootSite.StatusCode -ne 200) {
 Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveQemuGAURL" -Level "Info"
 
 $FPAQemuGADirectoryLinks = $FPAQemuGARootSite.Links |
-    ForEach-Object {
-        Get-QemuGAFolderMetadata -Href $_.href
-    } |
+    ForEach-Object { Get-QemuGAFolderMetadata -Href $_.href } |
     Where-Object { $_ -ne $null }
 
 $QemuGALatest = $FPAQemuGADirectoryLinks |
@@ -457,7 +562,7 @@ if ($null -eq $QemuGALatest) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-    $QemuGALocalComparableVersion = Get-QemuGALocalComparableVersion -VersionString $QemuGACurrentVersion
+    $QemuGALocalComparableVersion  = Get-QemuGALocalComparableVersion -VersionString $QemuGACurrentVersion
     $QemuGARemoteComparableVersion = Get-QemuGARemoteComparableVersion -Metadata $QemuGALatest
 
     if ($null -eq $QemuGALocalComparableVersion -or $null -eq $QemuGARemoteComparableVersion) {
@@ -475,14 +580,12 @@ if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
 
 if (-not $SkipQemuGA) {
     $FPAQemuGALatestURL = ([Uri]::new([Uri]$ArchiveQemuGAURL, $QemuGALatest.Href)).AbsoluteUri
-    if (-not $FPAQemuGALatestURL.EndsWith('/')) {
-        $FPAQemuGALatestURL += '/'
-    }
+    if (-not $FPAQemuGALatestURL.EndsWith('/')) { $FPAQemuGALatestURL += '/' }
 
     Write-Log -Message "Selected latest QEMU GA folder: $($QemuGALatest.Href) (Core=$($QemuGALatest.Core), Release=$($QemuGALatest.Release), Dist=$($QemuGALatest.Dist))" -Level "Info"
 
     try {
-        $FPAQemuGALatestSite = Invoke-WebRequest -Uri $FPAQemuGALatestURL -UseBasicParsing
+        $FPAQemuGALatestSite = Invoke-WebRequest -Uri $FPAQemuGALatestURL -UseBasicParsing -ErrorAction Stop
     }
     catch {
         Write-Log -Message "Failed to access latest qemu-ga directory at $FPAQemuGALatestURL. Error: $_" -Level "Error"
@@ -494,7 +597,7 @@ if (-not $SkipQemuGA) {
         exit 1
     }
 
-    $QemuGAMsiLink = $null
+    $QemuGAMsiLink    = $null
     $QemuGAmsiFileName = $null
     foreach ($msiCandidate in $QemuGAmsiCandidates) {
         $QemuGAMsiLink = $FPAQemuGALatestSite.Links | Where-Object { $_.href -eq $msiCandidate } | Select-Object -First 1
@@ -509,59 +612,28 @@ if (-not $SkipQemuGA) {
         exit 1
     }
 
-    $QemuGAmsiLocalPath = Join-Path -Path $ScriptTempPath -ChildPath $QemuGAmsiFileName
     $QemuGAmsiDownloadURL = $FPAQemuGALatestURL + $QemuGAmsiFileName
-    Write-Log -Message "QEMU Guest Agent download URL: $QemuGAmsiDownloadURL" -Level "Info"
-    Write-Log -Message "Starting QEMU Guest Agent download to: $ScriptTempPath" -Level "Info"
+    $QemuGAHashFileURL    = $FPAQemuGALatestURL + "$QemuGAmsiFileName.sha256"
 
-    try {
-        Invoke-WebRequest -Uri $QemuGAmsiDownloadURL -OutFile $QemuGAmsiLocalPath -UseBasicParsing
-        Write-Log -Message "Successfully downloaded $QemuGAmsiFileName" -Level "Info"
-    }
-    catch {
-        Write-Log -Message "Failed to download $QemuGAmsiFileName. Error: $_" -Level "Error"
-        exit 1
-    }
-
-    Write-Log -Message "Starting installation of $QemuGAmsiFileName" -Level "Info"
-    try {
-        $qemuInstallProcess = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$QemuGAmsiLocalPath`" /qn /norestart" -Wait -PassThru
-        if ($qemuInstallProcess.ExitCode -in 0, 3010) {
-            Write-Log -Message "Successfully installed $QemuGAmsiFileName" -Level "Info"
-            if ($qemuInstallProcess.ExitCode -eq 3010) {
-                $script:RebootRequired = $true
-                Write-Log -Message "QEMU Guest Agent installation requires a reboot (ExitCode 3010)." -Level "Warning"
-            }
-        }
-        else {
-            Write-Log -Message "Installation of $QemuGAmsiFileName failed with exit code $($qemuInstallProcess.ExitCode)" -Level "Error"
-            exit 1
-        }
-    }
-    catch {
-        Write-Log -Message "Failed to install $QemuGAmsiFileName. Error: $_" -Level "Error"
-        exit 1
-    }
-
-    $QemuCleanupConfirm = Read-Host "Should the downloaded QEMU Guest Agent MSI file be deleted? (y/N)"
-    if ($QemuCleanupConfirm -match "^[Yy]") {
-        try {
-            Remove-Item -Path $QemuGAmsiLocalPath -Force
-            Write-Log -Message "Deleted downloaded MSI file: $QemuGAmsiLocalPath" -Level "Info"
-        }
-        catch {
-            Write-Log -Message "Failed to delete downloaded MSI file: $QemuGAmsiLocalPath. Error: $_" -Level "Warning"
-        }
-    } else {
-        Write-Log -Message "Downloaded MSI file retained at: $QemuGAmsiLocalPath" -Level "Info"
-    }
+    Install-MsiPackage `
+        -DisplayName "QEMU Guest Agent" `
+        -MsiFileName $QemuGAmsiFileName `
+        -DownloadURL $QemuGAmsiDownloadURL `
+        -HashFileURL $QemuGAHashFileURL
 }
 
+# --- Reboot handling ---
 if ($script:RebootRequired) {
     Write-Log -Message "At least one installation requires a system reboot." -Level "Warning"
-    $RestartConfirm = Read-Host "A reboot is required to finalize installation. Restart now? (y/N)"
-    if ($RestartConfirm -match "^[Yy]") {
-        Write-Log -Message "User confirmed immediate reboot." -Level "Warning"
+
+    $doReboot = $AutoReboot
+    if (-not $doReboot) {
+        $restartAnswer = Read-Host "A reboot is required to finalize installation. Restart now? (y/N)"
+        $doReboot = $restartAnswer -match "^[Yy]"
+    }
+
+    if ($doReboot) {
+        Write-Log -Message "Initiating system reboot." -Level "Warning"
         try {
             Restart-Computer -Force
         }
@@ -571,20 +643,42 @@ if ($script:RebootRequired) {
         }
     }
     else {
-        Write-Log -Message "Reboot postponed by user. Please reboot later to complete installation." -Level "Warning"
+        Write-Log -Message "Reboot postponed. Please reboot later to complete installation." -Level "Warning"
     }
 }
 
-if (-not $(Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
-    Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre install a dumy vioscsi device to make migration seemless." -ForegroundColor Yellow
+# --- vioscsi dummy device check (Proxmox VE migration preparation) ---
+if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
+    Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
     $confirmVioSCSI = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
     if ($confirmVioSCSI -match "^[Yy]") {
-        # Invoke dummy device installer script from GitHub
-        $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
-        Invoke-RestMethod -Uri $dummyInstallerURL | Invoke-Expression
+        $dummyInstallerURL  = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
+        $dummyScriptPath    = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
+
+        Write-Log -Message "Downloading vioscsi dummy installer to: $dummyScriptPath" -Level "Info"
+        try {
+            Invoke-WebRequest -Uri $dummyInstallerURL -OutFile $dummyScriptPath -UseBasicParsing -ErrorAction Stop
+            Write-Log -Message "Successfully downloaded vioscsi dummy installer." -Level "Info"
+        }
+        catch {
+            Write-Log -Message "Failed to download vioscsi dummy installer. Error: $_" -Level "Error"
+            exit 1
+        }
+
+        Write-Log -Message "Executing vioscsi dummy installer." -Level "Info"
+        try {
+            & $dummyScriptPath
+        }
+        catch {
+            Write-Log -Message "Failed to execute vioscsi dummy installer. Error: $_" -Level "Error"
+            exit 1
+        }
     }
-} else {
+}
+else {
     Write-Host "vioscsi device found. No need to install a dummy vioscsi device." -ForegroundColor Green
 }
+
+Write-Log -Message "=== Script completed ===" -Level "Info"
 
 #EndRegion
