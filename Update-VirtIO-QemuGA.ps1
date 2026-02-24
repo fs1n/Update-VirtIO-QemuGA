@@ -575,4 +575,16 @@ if ($script:RebootRequired) {
     }
 }
 
+if (-not $(Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
+    Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre install a dumy vioscsi device to make migration seemless." -ForegroundColor Yellow
+    $confirmVioSCSI = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
+    if ($confirmVioSCSI -match "^[Yy]") {
+        # Invoke dummy device installer script from GitHub
+        $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
+        Invoke-RestMethod -Uri $dummyInstallerURL | Invoke-Expression
+    }
+} else {
+    Write-Host "vioscsi device found. No need to install a dummy vioscsi device." -ForegroundColor Green
+}
+
 #EndRegion
