@@ -9,9 +9,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 - Detects currently installed versions and skips updates when already up to date
 - Resolves and downloads the latest MSI from the Fedora People Archive
 - Silent MSI installation with prompt for reboot
-- Structured timestamped log file per run
-- Optional SHA256 hash verification (non-fatal if hash file is unavailable)
-- Checks for a `vioscsi` device and offers to install a dummy device for seamless migration from another hypervisor
+- Checks for a `vioscsi` device and offers to install a dummy device for seamless Proxmox VE migration
 - Compatible with **PowerShell 5.1** and **PowerShell 7**
 - Non-interactive mode for use in scheduled tasks or RMM tools
 
@@ -19,7 +17,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 
 ## Requirements
 
-- Windows OS
+- Windows - Tested on Server 22 others will follow
 - **Administrator privileges**
 - Internet access to `fedorapeople.org`
 
