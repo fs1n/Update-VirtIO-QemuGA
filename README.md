@@ -64,6 +64,12 @@ Each run writes a log file to:
 
 ---
 
+## Contributing
+
+If you would like to contribute, have spotted an error or have any other feedback, please open a PR or issue.
+
+---
+
 ## License
 
 [MIT](LICENSE)

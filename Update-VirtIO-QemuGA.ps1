@@ -49,12 +49,10 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.4
+    Version           : 0.2.5
     Author            : Frederik S. (fs1n)
     License           : MIT License
-
-.LINK
-    TO_BE_REPLACED_DOCUMENTATION_URL
+    GitHub            : fs1n/Update-VirtIO-QemuGA
 #>
 
 [CmdletBinding()]
@@ -65,7 +63,9 @@ param(
     [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "0.2.4"
+$ScriptVersion = "0.2.5"
+
+#Regtion Environment Validation
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -73,7 +73,15 @@ if ($env:OS -ne "Windows_NT") {
     exit 1
 }
 
-# Check if run as administrator
+# Check if running on x86_64 -> x64 for System Protection of installing wrong drivers
+# Currently only x64 is supported by the script, so this is only a sanity check.
+# Posts future feature to support maby arm64 etc. if this ever becomes relevant.
+if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
+    Write-Host "This script is only intended to run on x86_64 (AMD64) Windows systems!" -ForegroundColor Red
+    exit 1
+}
+
+# Check if script is run as administrator
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "This script must be run with administrator privileges!" -ForegroundColor Red
@@ -84,6 +92,8 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
     # Use bitwise OR to preserve any already-enabled protocols (e.g. TLS 1.3)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 }
+
+#EndRegion
 
 #Region Variables
 
@@ -118,6 +128,7 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 }
 
 # Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
+# In Previouse verion it was daily based witch to me was enoying.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
@@ -165,6 +176,19 @@ function Write-Log {
         "Warning" { Write-Host $logEntry -ForegroundColor Yellow }
         "Error"   { Write-Host $logEntry -ForegroundColor Red }
     }
+}
+
+Function Read-YesNoChoice {
+    [CmdletBinding()]
+    Param (
+        [Parameter(Mandatory=$false)][String]$Title = "",
+        [Parameter(Mandatory=$true)][String]$Message,
+        [Parameter(Mandatory=$false)][Int]$DefaultOption = 0
+    )
+    $No = New-Object System.Management.Automation.Host.ChoiceDescription '&No', 'No'
+    $Yes = New-Object System.Management.Automation.Host.ChoiceDescription '&Yes', 'Yes'
+    $Options = [System.Management.Automation.Host.ChoiceDescription[]]($No, $Yes)
+    return $host.ui.PromptForChoice($Title, $Message, $Options, $DefaultOption)
 }
 
 function Get-QemuGAFolderMetadata {
@@ -330,8 +354,8 @@ function Install-MsiPackage {
     # --- Cleanup ---
     $doCleanup = $AutoCleanup
     if (-not $doCleanup) {
-        $cleanupAnswer = Read-Host "Should the downloaded MSI file be deleted? (y/N)"
-        $doCleanup = $cleanupAnswer -match "^[Yy]"
+        $cleanupAnswer = Read-YesNoChoice -Message "Should the downloaded MSI file be deleted? (y/N)" -DefaultOption 0
+        $doCleanup = $cleanupAnswer -match 1
     }
 
     if ($doCleanup) {
@@ -355,8 +379,8 @@ function Install-MsiPackage {
 Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v$ScriptVersion started ===" -Level "Info"
 
 if (-not $Force) {
-    $confirm = Read-Host "Should the VirtIO drivers and the QEMU Guest Agent be updated? (y/N)"
-    if ($confirm -notmatch "^[Yy]") {
+    $confirm = Read-YesNoChoice -Message "Should the VirtIO drivers and the QEMU Guest Agent be updated? (y/N)" -DefaultOption 0
+    if ($confirm -notmatch 1) {
         Write-Host "Script canceled." -ForegroundColor Yellow
         exit 0
     }
@@ -585,8 +609,8 @@ if ($script:RebootRequired) {
 
     $doReboot = $AutoReboot
     if (-not $doReboot) {
-        $restartAnswer = Read-Host "A reboot is required to finalize installation. Restart now? (y/N)"
-        $doReboot = $restartAnswer -match "^[Yy]"
+        $restartAnswer = Read-YesNoChoice -Message "A reboot is required to finalize installation. Restart now? (y/N)" -DefaultOption 0
+        $doReboot = $restartAnswer -match 1
     }
 
     if ($doReboot) {
@@ -610,13 +634,15 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
     $doInstallVioSCSI = $InstallVioSCSI.IsPresent
     if (-not $Force -and -not $doInstallVioSCSI) {
         Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
-        $confirmVioSCSI   = Read-Host "Do you want to install a dummy vioscsi device now? (y/N)"
-        $doInstallVioSCSI = $confirmVioSCSI -match "^[Yy]"
+        Write-Host "To install the dummy vioscsi device, an external script will be downloaded and executed from GitHub. The script is open source and available at:" -ForegroundColor Red
+        Write-Host "https://github.com/croit/load-virtio-scsi-on-boot" -ForegroundColor Red
+        $confirmVioSCSI   = Read-YesNoChoice -Message "Do you want to install a dummy vioscsi device now? (y/N)" -DefaultOption 0
+        $doInstallVioSCSI = $confirmVioSCSI -match 1
     }
 
     if ($doInstallVioSCSI) {
         # Credit: vioscsi dummy device installer by croit
-        # https://github.com/croit/load-virtio-scsi-on-boot
+        # https://github.com/croit/load-virtio-scsi-on-boot (MIT License)
         $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
         $dummyScriptPath   = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
 
@@ -632,7 +658,12 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
 
         Write-Log -Message "Executing vioscsi dummy installer." -Level "Info"
         try {
-            & $dummyScriptPath
+            $shell = if ($PSVersionTable.PSVersion.Major -ge 6) { "pwsh.exe" } else { "powershell.exe" }
+            & $shell -ExecutionPolicy Bypass -File $dummyScriptPath
+
+            # Clean up downloaded script after successful execution
+            Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue
+            Write-Log -Message "Deleted vioscsi dummy installer Script: $dummyScriptPath" -Level "Info"
         }
         catch {
             Write-Log -Message "Failed to execute vioscsi dummy installer. Error: $_" -Level "Error"
