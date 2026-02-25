@@ -19,7 +19,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 
 - Windows - Tested on Server 22 others will follow
 - **Administrator privileges**
-- Internet access to `fedorapeople.org`
+- Internet access to `fedorapeople.org` & **THE** GitHub Domains
 
 ---
 
