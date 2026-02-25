@@ -49,7 +49,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.5
+    Version           : 0.2.6
     Author            : Frederik S. (fs1n)
     License           : MIT License
     GitHub            : fs1n/Update-VirtIO-QemuGA
@@ -63,7 +63,7 @@ param(
     [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "0.2.5"
+$ScriptVersion = "0.2.6"
 
 #Regtion Environment Validation
 
@@ -110,7 +110,6 @@ $UninstallRegistryPaths = @(
 $VirtIODisplayNamePattern  = "*virtio*installer*"
 $QemuGADisplayNamePattern  = "*QEMU Guest Agent*"
 $VirtIOmsiFileName         = "virtio-win-gt-x64.msi"
-$QemuGAFolderPattern       = '^qemu-ga-win-(?<Core>\d+(?:\.\d+){0,3})-(?<Release>\d+)(?:\.(?<Dist>[^/]+))?/?$'
 $QemuGAmsiCandidates       = @(
     "qemu-ga-x86_64.msi",
     "qemu-ga-x64.msi"
@@ -191,53 +190,6 @@ Function Read-YesNoChoice {
     return $host.ui.PromptForChoice($Title, $Message, $Options, $DefaultOption)
 }
 
-function Get-QemuGAFolderMetadata {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Href
-    )
-
-    $match = [regex]::Match($Href, $QemuGAFolderPattern)
-    if (-not $match.Success) { return $null }
-
-    $coreRaw   = $match.Groups['Core'].Value
-    $coreParts = $coreRaw.Split('.')
-    $core1 = 0; $core2 = 0; $core3 = 0; $core4 = 0
-
-    if ($coreParts.Count -ge 1) { $core1 = [int]$coreParts[0] }
-    if ($coreParts.Count -ge 2) { $core2 = [int]$coreParts[1] }
-    if ($coreParts.Count -ge 3) { $core3 = [int]$coreParts[2] }
-    if ($coreParts.Count -ge 4) { $core4 = [int]$coreParts[3] }
-
-    $release   = [int]$match.Groups['Release'].Value
-    $distRaw   = $match.Groups['Dist'].Value
-    $distMajor = 0
-    $distMinor = 0
-
-    if (-not [string]::IsNullOrWhiteSpace($distRaw)) {
-        $distMatch = [regex]::Match($distRaw, 'el(?<major>\d+)(?:_(?<minor>\d+))?')
-        if ($distMatch.Success) {
-            $distMajor = [int]$distMatch.Groups['major'].Value
-            if ($distMatch.Groups['minor'].Success) {
-                $distMinor = [int]$distMatch.Groups['minor'].Value
-            }
-        }
-    }
-
-    [PSCustomObject]@{
-        Href      = $Href
-        Core      = $coreRaw
-        Release   = $release
-        Dist      = $distRaw
-        SortCore1 = $core1
-        SortCore2 = $core2
-        SortCore3 = $core3
-        SortCore4 = $core4
-        DistMajor = $distMajor
-        DistMinor = $distMinor
-    }
-}
 
 function Get-VirtIOComparableVersion {
     [CmdletBinding()]
@@ -257,41 +209,7 @@ function Get-VirtIOComparableVersion {
     return [version]$match.Groups['Core'].Value
 }
 
-function Get-QemuGALocalComparableVersion {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$VersionString
-    )
 
-    if ([string]::IsNullOrWhiteSpace($VersionString)) { return $null }
-
-    $normalized = $VersionString.Trim()
-    $match = [regex]::Match($normalized, '^(?<Core>\d+(?:\.\d+){1,3})$')
-    if (-not $match.Success) { return $null }
-
-    return [version]$match.Groups['Core'].Value
-}
-
-function Get-QemuGARemoteComparableVersion {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [psobject]$Metadata
-    )
-
-    if ($null -eq $Metadata) { return $null }
-
-    # Parse Core string directly (e.g. "110.0.2") instead of rebuilding from SortCore fields.
-    # Rebuilding always produces a 4-part version (e.g. "110.0.2.0"), but PowerShell's [version]
-    # treats a missing 4th component as -1, so [version]"110.0.2" -ge [version]"110.0.2.0" = $false.
-    # Parsing the original Core string preserves the correct component count for a fair comparison.
-    try {
-        return [version]$Metadata.Core
-    } catch {
-        return $null
-    }
-}
 
 function Install-MsiPackage {
     <#
@@ -354,7 +272,7 @@ function Install-MsiPackage {
     # --- Cleanup ---
     $doCleanup = $AutoCleanup
     if (-not $doCleanup) {
-        $cleanupAnswer = Read-YesNoChoice -Message "Should the downloaded MSI file be deleted? (y/N)" -DefaultOption 0
+        $cleanupAnswer = Read-YesNoChoice -Message "Should the downloaded MSI file be deleted?" -DefaultOption 1
         $doCleanup = $cleanupAnswer -match 1
     }
 
@@ -379,7 +297,7 @@ function Install-MsiPackage {
 Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v$ScriptVersion started ===" -Level "Info"
 
 if (-not $Force) {
-    $confirm = Read-YesNoChoice -Message "Should the VirtIO drivers and the QEMU Guest Agent be updated? (y/N)" -DefaultOption 0
+    $confirm = Read-YesNoChoice -Message "Should the VirtIO drivers and the QEMU Guest Agent be updated?" -DefaultOption 0
     if ($confirm -notmatch 1) {
         Write-Host "Script canceled." -ForegroundColor Yellow
         exit 0
@@ -531,12 +449,17 @@ if ($FPAQemuGARootSite.StatusCode -ne 200) {
 }
 Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveQemuGAURL" -Level "Info"
 
-$FPAQemuGADirectoryLinks = $FPAQemuGARootSite.Links |
-    ForEach-Object { Get-QemuGAFolderMetadata -Href $_.href } |
-    Where-Object { $_ -ne $null }
-
-$QemuGALatest = $FPAQemuGADirectoryLinks |
-    Sort-Object -Property SortCore1, SortCore2, SortCore3, SortCore4, Release, DistMajor, DistMinor -Descending |
+$QemuGALatest = $FPAQemuGARootSite.Links |
+    Where-Object { $_.href -match '^qemu-ga-win-[\d.]+-\d+' } |
+    ForEach-Object {
+        $m = [regex]::Match($_.href, '^qemu-ga-win-([\d.]+)-(\d+)')
+        [PSCustomObject]@{
+            Href    = $_.href
+            Version = [version]$m.Groups[1].Value
+            Release = [int]$m.Groups[2].Value
+        }
+    } |
+    Sort-Object Version, Release -Descending |
     Select-Object -First 1
 
 if ($null -eq $QemuGALatest) {
@@ -545,19 +468,22 @@ if ($null -eq $QemuGALatest) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-    $QemuGALocalComparableVersion  = Get-QemuGALocalComparableVersion -VersionString $QemuGACurrentVersion
-    $QemuGARemoteComparableVersion = Get-QemuGARemoteComparableVersion -Metadata $QemuGALatest
+    try {
+        $QemuGALocalVersion  = [version]$QemuGACurrentVersion
+        $QemuGARemoteVersion = $QemuGALatest.Version
+    } catch {
+        Write-Log -Message "QEMU Guest Agent version format is incompatible for comparison (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)'). QEMU Guest Agent update will be skipped." -Level "Error"
+        $SkipQemuGA = $true
+    }
 
-    if ($null -eq $QemuGALocalComparableVersion -or $null -eq $QemuGARemoteComparableVersion) {
-        Write-Log -Message "QEMU Guest Agent version format is incompatible for comparison (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Core)-$($QemuGALatest.Release)'). QEMU Guest Agent update will be skipped." -Level "Error"
-        $SkipQemuGA = $true
-    }
-    elseif ($QemuGALocalComparableVersion -ge $QemuGARemoteComparableVersion) {
-        Write-Log -Message "QEMU Guest Agent is already up to date or newer (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Core)'). Skipping QEMU Guest Agent installation." -Level "Info"
-        $SkipQemuGA = $true
-    }
-    else {
-        Write-Log -Message "QEMU Guest Agent update required (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Core)')." -Level "Info"
+    if (-not $SkipQemuGA) {
+        if ($QemuGALocalVersion -ge $QemuGARemoteVersion) {
+            Write-Log -Message "QEMU Guest Agent is already up to date or newer (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)'). Skipping QEMU Guest Agent installation." -Level "Info"
+            $SkipQemuGA = $true
+        }
+        else {
+            Write-Log -Message "QEMU Guest Agent update required (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)')." -Level "Info"
+        }
     }
 }
 
@@ -565,7 +491,7 @@ if (-not $SkipQemuGA) {
     $FPAQemuGALatestURL = ([Uri]::new([Uri]$ArchiveQemuGAURL, $QemuGALatest.Href)).AbsoluteUri
     if (-not $FPAQemuGALatestURL.EndsWith('/')) { $FPAQemuGALatestURL += '/' }
 
-    Write-Log -Message "Selected latest QEMU GA folder: $($QemuGALatest.Href) (Core=$($QemuGALatest.Core), Release=$($QemuGALatest.Release), Dist=$($QemuGALatest.Dist))" -Level "Info"
+    Write-Log -Message "Selected latest QEMU GA folder: $($QemuGALatest.Href) (Version=$($QemuGALatest.Version), Release=$($QemuGALatest.Release))" -Level "Info"
 
     try {
         $FPAQemuGALatestSite = Invoke-WebRequest -Uri $FPAQemuGALatestURL -UseBasicParsing -ErrorAction Stop
@@ -660,7 +586,7 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
         try {
             $shell = if ($PSVersionTable.PSVersion.Major -ge 6) { "pwsh.exe" } else { "powershell.exe" }
             & $shell -ExecutionPolicy Bypass -File $dummyScriptPath
-
+            
             # Clean up downloaded script after successful execution
             Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue
             Write-Log -Message "Deleted vioscsi dummy installer Script: $dummyScriptPath" -Level "Info"
