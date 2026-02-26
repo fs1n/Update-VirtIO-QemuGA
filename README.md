@@ -17,7 +17,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 
 ## Requirements
 
-- Windows - Tested on Server 22 others will follow
+- Some Windows OS
 - **Administrator privileges**
 - Internet access to `fedorapeople.org` & **THE** GitHub Domains
 
@@ -28,6 +28,11 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 ### Interactive
 ```powershell
 .\Update-VirtIO-QemuGA.ps1
+```
+
+### Interactive via web
+```powershell
+irm https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1 | iex
 ```
 
 ### Fully automated (no prompts)

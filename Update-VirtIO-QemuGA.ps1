@@ -49,7 +49,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 0.2.6
+    Version           : 1.0.0
     Author            : Frederik S. (fs1n)
     License           : MIT License
     GitHub            : fs1n/Update-VirtIO-QemuGA
@@ -63,7 +63,7 @@ param(
     [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "0.2.6"
+$ScriptVersion = "1.0.0"
 
 #Regtion Environment Validation
 
