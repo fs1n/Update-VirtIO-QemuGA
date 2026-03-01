@@ -8,8 +8,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 
 - Detects currently installed versions and skips updates when already up to date
 - Resolves and downloads the latest MSI from the Fedora People Archive
-- Silent MSI installation with prompt for reboot
-- Checks for a `vioscsi` device and offers to install a dummy device for seamless Proxmox VE migration
+- Checks for a `vioscsi` device and offers to also run a Script to install a dummy `vioscsi` device for seemless migration to e.g. Proxmox VE
 - Compatible with **PowerShell 5.1** and **PowerShell 7**
 - Non-interactive mode for use in scheduled tasks or RMM tools
 
@@ -30,7 +29,7 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 .\Update-VirtIO-QemuGA.ps1
 ```
 
-### Interactive via web
+### Interactive loaded directly from GitHub
 ```powershell
 irm https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1 | iex
 ```
