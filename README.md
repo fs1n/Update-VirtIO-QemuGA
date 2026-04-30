@@ -2,7 +2,6 @@
 
 A PowerShell script to automatically update **VirtIO Windows drivers** and the **QEMU Guest Agent** from the [Fedora People Archive](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads). Useful for keeping Windows VMs on QEMU/KVM or Proxmox VE up to date.
 
----
 
 ## Features
 
@@ -12,15 +11,13 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 - Compatible with **PowerShell 5.1** and **PowerShell 7**
 - Non-interactive mode for use in scheduled tasks or RMM tools
 
----
 
 ## Requirements
 
 - Some Windows OS
 - **Administrator privileges**
-- Internet access to `fedorapeople.org` & **THE** GitHub Domains
+- Internet access and connection to `fedorapeople.org` & **THE** GitHub Domains
 
----
 
 ## Usage
 
@@ -29,24 +26,30 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 .\Update-VirtIO-QemuGA.ps1
 ```
 
-### Interactive loaded directly from GitHub
-```powershell
-irm https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1 | iex
-```
-
 ### Fully automated (no prompts)
 ```powershell
 .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot
 ```
 
-### Via Windows PowerShell 5.1
+### Interactive loaded directly from GitHub
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
+irm https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1 | iex
 ```
 
-### To find all possibilites look at the script header!
+### Interactive loaded from GitHub with Parameters
+```powershell
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1" -UseBasicParsing))) <Parameter of your choice>
+```
 
----
+e.g. :
+
+```powershell
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/Update-VirtIO-QemuGA.ps1" -UseBasicParsing))) -Force -AutoCleanup
+```
+
+
+### **To find all possibilites look at the script header!**
+
 
 ## Parameters
 
@@ -57,7 +60,6 @@ powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1
 | `-AutoReboot` | Reboots automatically if required (exit code 3010), without prompting |
 | `-InstallVioSCSI` | Automatically installs the vioscsi dummy device without prompting |
 
----
 
 ## Logs
 
@@ -66,19 +68,16 @@ Each run writes a log file to:
 %TEMP%\Qemu-VirtIO-Update-Temp\log_yyyy-MM-dd_HH-mm-ss.log
 ```
 
----
 
 ## Contributing
 
 If you would like to contribute, have spotted an error or have any other feedback, please open a PR or issue.
 
----
 
 ## License
 
 [MIT](LICENSE)
 
----
 
 ## Credits
 

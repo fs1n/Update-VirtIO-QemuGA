@@ -49,7 +49,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 1.0.0
+    Version           : 1.1.0
     Author            : Frederik S. (fs1n)
     License           : MIT License
     GitHub            : fs1n/Update-VirtIO-QemuGA
@@ -63,7 +63,7 @@ param(
     [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "1.0.0"
+$ScriptVersion = "1.1.0"
 
 #Regtion Environment Validation
 
@@ -75,7 +75,8 @@ if ($env:OS -ne "Windows_NT") {
 
 # Check if running on x86_64 -> x64 for System Protection of installing wrong drivers
 # Currently only x64 is supported by the script, so this is only a sanity check.
-# Posts future feature to support maby arm64 etc. if this ever becomes relevant.
+# Posts possibility for future feature to support arm64 etc. if this ever becomes relevant
+# and if virtio-win and qemu-ga provide compatible drivers for those architectures.
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
     Write-Host "This script is only intended to run on x86_64 (AMD64) Windows systems!" -ForegroundColor Red
     exit 1
@@ -88,6 +89,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 1
 }
 
+# Set TLS 1.2 if ran on PowerShell 5 (If Powershell 5 or lower)
 if ($PSVersionTable.PSVersion.Major -le 5) {
     # Use bitwise OR to preserve any already-enabled protocols (e.g. TLS 1.3)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -97,7 +99,7 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 
 #Region Variables
 
-# FPA is used as the alias for Fedora People Archive in the script
+# FPA is used as the alias/abbreviation for Fedora People Archive in the script
 $FPARootURL        = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads"
 $ArchiveVirtIOURL  = "$FPARootURL/archive-virtio/"
 $ArchiveQemuGAURL  = "$FPARootURL/archive-qemu-ga/"
@@ -114,6 +116,7 @@ $QemuGAmsiCandidates       = @(
     "qemu-ga-x86_64.msi",
     "qemu-ga-x64.msi"
 )
+
 $QemuGAExecutablePaths = @(
     'C:\Program Files\Qemu-ga\qemu-ga.exe',
     'C:\Program Files (x86)\Qemu-ga\qemu-ga.exe'
@@ -190,6 +193,35 @@ Function Read-YesNoChoice {
     return $host.ui.PromptForChoice($Title, $Message, $Options, $DefaultOption)
 }
 
+function Test-PendingReboot {
+# Based on https://stackoverflow.com/questions/47867949/how-can-i-check-for-a-pending-reboot
+    $pending = $false
+    $checks = @(
+        @{Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'; Value = 'RebootPending'; Type = 'Key'},
+        @{Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'; Value = 'RebootInProgress'; Type = 'Value'},
+        @{Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing'; Value = 'PackagesPending'; Type = 'Value'},
+        @{Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'; Value = 'PendingFileRenameOperations'; Type = 'Value'},
+        @{Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'; Value = 'PendingFileRenameOperations2'; Type = 'Value'},
+        @{Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update'; Value = 'RebootRequired'; Type = 'Key'}
+    )
+
+    foreach ($check in $checks) {
+        if ($check.Type -eq 'Key') {
+            if (Test-Path $check.Path) {
+                $pending = $true
+                Write-Log -Message "Pending reboot marker detected: $($check.Path) exists" -Level "Warning"
+            }
+        } else {
+            try {
+                Get-ItemProperty -Path $check.Path -Name $check.Value -ErrorAction Stop | Out-Null
+                $pending = $true
+                Write-Log -Message "Pending reboot marker detected: $($check.Path)\$($check.Value) exists" -Level "Warning"
+            } catch {}
+        }
+    }
+
+    return $pending
+}
 
 function Get-VirtIOComparableVersion {
     [CmdletBinding()]
@@ -208,8 +240,6 @@ function Get-VirtIOComparableVersion {
 
     return [version]$match.Groups['Core'].Value
 }
-
-
 
 function Install-MsiPackage {
     <#
@@ -262,6 +292,11 @@ function Install-MsiPackage {
         else {
             Write-Log -Message "Installation of $MsiFileName failed with exit code $($installProcess.ExitCode)" -Level "Error"
             exit 1
+        }
+
+        if (Test-PendingReboot) {
+            $script:RebootRequired = $true
+            Write-Log -Message "$DisplayName installation left the system in a pending reboot state." -Level "Warning"
         }
     }
     catch {
@@ -368,6 +403,7 @@ if ($FPAVirtIORootSite.StatusCode -ne 200) {
     Write-Log -Message "Failed to access Fedora People Archive at $ArchiveVirtIOURL. Status Code: $($FPAVirtIORootSite.StatusCode)" -Level "Error"
     exit 1
 }
+
 Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveVirtIOURL" -Level "Info"
 
 $FPAVirtIODirectoryLinks = $FPAVirtIORootSite.Links |
@@ -421,6 +457,7 @@ if (-not $SkipVirtIO) {
     }
 
     $VirtIOmsiLink = $FPAVirtIOLatestSite.Links | Where-Object { $_.href -eq $VirtIOmsiFileName } | Select-Object -First 1
+
     if ($null -eq $VirtIOmsiLink) {
         Write-Log -Message "Could not find $VirtIOmsiFileName in the latest directory." -Level "Error"
         exit 1
@@ -447,6 +484,7 @@ if ($FPAQemuGARootSite.StatusCode -ne 200) {
     Write-Log -Message "Failed to access Fedora People Archive at $ArchiveQemuGAURL. Status Code: $($FPAQemuGARootSite.StatusCode)" -Level "Error"
     exit 1
 }
+
 Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveQemuGAURL" -Level "Info"
 
 $QemuGALatest = $FPAQemuGARootSite.Links |
@@ -471,7 +509,8 @@ if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
     try {
         $QemuGALocalVersion  = [version]$QemuGACurrentVersion
         $QemuGARemoteVersion = $QemuGALatest.Version
-    } catch {
+    }
+    catch {
         Write-Log -Message "QEMU Guest Agent version format is incompatible for comparison (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)'). QEMU Guest Agent update will be skipped." -Level "Error"
         $SkipQemuGA = $true
     }
@@ -531,6 +570,7 @@ if (-not $SkipQemuGA) {
 
 # --- Reboot handling ---
 if ($script:RebootRequired) {
+
     Write-Log -Message "At least one installation requires a system reboot." -Level "Warning"
 
     $doReboot = $AutoReboot
@@ -573,6 +613,7 @@ if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
         $dummyScriptPath   = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
 
         Write-Log -Message "Downloading vioscsi dummy installer to: $dummyScriptPath" -Level "Info"
+        
         try {
             Invoke-WebRequest -Uri $dummyInstallerURL -OutFile $dummyScriptPath -UseBasicParsing -ErrorAction Stop
             Write-Log -Message "Successfully downloaded vioscsi dummy installer." -Level "Info"
