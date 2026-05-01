@@ -1,3 +1,10 @@
+> [!CAUTION]
+> **Script currently not working**
+>
+> `fedorapeople.org` changed their site protection - archive requests are being blocked by the new bot protection.
+>
+> **Fix is in progress.**
+
 # Update-VirtIO-QemuGA
 
 A PowerShell script to automatically update **VirtIO Windows drivers** and the **QEMU Guest Agent** from the [Fedora People Archive](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads). Useful for keeping Windows VMs on QEMU/KVM or Proxmox VE up to date.
