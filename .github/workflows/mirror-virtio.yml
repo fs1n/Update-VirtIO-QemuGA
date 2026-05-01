@@ -15,6 +15,7 @@ jobs:
 
     env:
       KEEP_VERSIONS: "3"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
 
