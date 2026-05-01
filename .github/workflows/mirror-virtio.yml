@@ -36,8 +36,20 @@ jobs:
       - name: Scrape and download MSIs
         run: node .github/scripts/mirror-scrape.js
 
+      # Rename MSIs to include version in filename so all assets have unique names in the release.
+      # GitHub release assets are identified by basename only — uploading multiple files with the
+      # same name in one command causes HTTP 404 even with --clobber.
+      # Result: virtio-win-gt-x64.msi → virtio-win-gt-x64_0.1.285-1.msi, etc.
+      - name: Rename MSIs with version suffix
+        run: |
+          find mirror-out -name "*.msi" | while read f; do
+            version=$(basename "$(dirname "$f")")
+            dir=$(dirname "$f")
+            name=$(basename "$f" .msi)
+            mv "$f" "${dir}/${name}_${version}.msi"
+          done
+
       # Upload all MSIs and the manifest, replacing existing assets with --clobber
-      # Using find to explicitly resolve the glob before passing to gh
       - name: Upload assets to mirror-latest
         run: |
           FILES=$(find mirror-out -name "*.msi" -o -name "manifest.json" | tr '\n' ' ')
