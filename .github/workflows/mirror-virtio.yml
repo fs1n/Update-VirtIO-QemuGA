@@ -35,7 +35,7 @@ jobs:
           npm install playwright
           npx playwright install chromium --with-deps
 
-      # ── 3. rclone (awscli v2 nutzt aws-chunked, was C2 nicht unterstützt) ─
+      # ── 3. rclone ─────────────────────────────────────────────────────────
       - name: Install rclone
         run: curl -fsSL https://rclone.org/install.sh | sudo bash
 
@@ -45,24 +45,27 @@ jobs:
           cat > ~/.config/rclone/rclone.conf << EOF
           [c2]
           type = s3
-          provider = Other
+          provider = Synology
           access_key_id = $S3_KEY
           secret_access_key = $S3_SECRET
           region = $S3_REGION
           endpoint = $S3_ENDPOINT
+          force_path_style = true
           no_check_bucket = true
-          upload_cutoff = 5G
-          chunk_size = 5G
           disable_checksum = true
           EOF
 
-      # ── 4. Scrape + Download via Playwright ───────────────────────────────
+      # ── 4. S3-Zugang prüfen (schlägt früh fehl wenn Credentials falsch) ──
+      - name: Validate S3 access
+        run: rclone lsd c2:$S3_BUCKET --log-level INFO
+
+      # ── 5. Scrape + Download via Playwright ───────────────────────────────
       - name: Scrape Fedora Archive and download MSIs
         run: node .github/scripts/mirror-scrape.js
         env:
           KEEP_VERSIONS: ${{ env.KEEP_VERSIONS }}
 
-      # ── 5. Upload zu Synology C2 via rclone ──────────────────────────────
+      # ── 6. Upload zu Synology C2 via rclone ──────────────────────────────
       - name: Upload to Synology C2
         run: |
           rclone sync ./mirror-out/ c2:$S3_BUCKET/virtio-mirror/ \
@@ -71,7 +74,7 @@ jobs:
             --retries 3 \
             --log-level INFO
 
-      # ── 6. Zusammenfassung in Job Summary ─────────────────────────────────
+      # ── 7. Zusammenfassung in Job Summary ─────────────────────────────────
       - name: Write job summary
         if: always()
         run: |
