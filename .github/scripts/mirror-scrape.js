@@ -61,6 +61,15 @@ function extractLinks(html) {
 }
 
 /**
+ * Returns the last path segment of an href, stripping trailing slashes.
+ * Handles both relative ("virtio-win-0.1.266-1/") and absolute
+ * ("/groups/.../virtio-win-0.1.266-1/") hrefs from directory listings.
+ */
+function hrefBasename(href) {
+  return href.replace(/\/$/, '').split('/').pop();
+}
+
+/**
  * Downloads a file via HTTP(S). Follows redirects.
  * Playwright cookies are provided as headers so
  * the download is not blocked again.
@@ -129,12 +138,13 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log('\n=== VirtIO ===');
     const virtioIndexHtml = await fetchWithBrowser(page, VIRTIO_ARCHIVE);
     const virtioLinks = extractLinks(virtioIndexHtml)
-      .filter(h => /virtio-win-[\d.]+-\d+\/?$/.test(h));
+      .filter(h => /^virtio-win-[\d.]+-\d+$/.test(hrefBasename(h)));
 
     const virtioVersions = virtioLinks
       .map(href => {
-        const m = href.match(/virtio-win-([\d.]+-\d+)/);
-        return m ? { href: href.replace(/\/$/, ''), version: m[1] } : null;
+        const basename = hrefBasename(href);
+        const m = basename.match(/virtio-win-([\d.]+-\d+)/);
+        return m ? { basename, version: m[1] } : null;
       })
       .filter(Boolean)
       .sort((a, b) => {
@@ -151,11 +161,11 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log(`  Found (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
 
     for (const v of virtioVersions) {
-      const dirUrl  = `${VIRTIO_ARCHIVE}${v.href}/`;
+      const dirUrl  = `${VIRTIO_ARCHIVE}${v.basename}/`;
       const dirHtml = await fetchWithBrowser(page, dirUrl);
-      const fileLinks = extractLinks(dirHtml);
+      const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
-      if (!fileLinks.includes(VIRTIO_MSI)) {
+      if (!fileBasenames.includes(VIRTIO_MSI)) {
         console.warn(` ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
         continue;
       }
@@ -181,12 +191,13 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log('\n=== QEMU Guest Agent ===');
     const qemuIndexHtml = await fetchWithBrowser(page, QEMUGA_ARCHIVE);
     const qemuLinks = extractLinks(qemuIndexHtml)
-      .filter(h => /^qemu-ga-win-[\d.]+-\d+/.test(h));
+      .filter(h => /^qemu-ga-win-[\d.]+-\d+/.test(hrefBasename(h)));
 
     const qemuVersions = qemuLinks
       .map(href => {
-        const m = href.match(/^qemu-ga-win-([\d.]+)-(\d+)/);
-        return m ? { href: href.replace(/\/$/, ''), version: m[1], release: parseInt(m[2], 10) } : null;
+        const basename = hrefBasename(href);
+        const m = basename.match(/^qemu-ga-win-([\d.]+)-(\d+)/);
+        return m ? { basename, version: m[1], release: parseInt(m[2], 10) } : null;
       })
       .filter(Boolean)
       .sort((a, b) => {
@@ -203,13 +214,13 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log(`  Found (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
 
     for (const v of qemuVersions) {
-      const dirUrl  = `${QEMUGA_ARCHIVE}${v.href}/`;
+      const dirUrl  = `${QEMUGA_ARCHIVE}${v.basename}/`;
       const dirHtml = await fetchWithBrowser(page, dirUrl);
-      const fileLinks = extractLinks(dirHtml);
+      const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
       let msiFile = null;
       for (const candidate of QEMUGA_MSI_CANDIDATES) {
-        if (fileLinks.includes(candidate)) { msiFile = candidate; break; }
+        if (fileBasenames.includes(candidate)) { msiFile = candidate; break; }
       }
 
       if (!msiFile) {

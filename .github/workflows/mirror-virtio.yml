@@ -36,17 +36,6 @@ jobs:
       - name: Scrape and download MSIs
         run: node .github/scripts/mirror-scrape.js
 
-      # Create the release if it doesn't exist yet, ignore error if it already does
-      - name: Ensure mirror-latest release exists
-        run: |
-          gh release create "mirror-latest" \
-            --title "VirtIO & QEMU-GA Mirror (latest)" \
-            --notes "Automated mirror of the last $KEEP_VERSIONS versions from fedorapeople.org. Updated daily." \
-            --prerelease \
-          || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       # Upload all MSIs and the manifest, replacing existing assets with --clobber
       # Using find to explicitly resolve the glob before passing to gh
       - name: Upload assets to mirror-latest
