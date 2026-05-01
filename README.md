@@ -9,6 +9,7 @@
 
 A PowerShell script to automatically update **VirtIO Windows drivers** and the **QEMU Guest Agent** from the [Fedora People Archive](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads). Useful for keeping Windows VMs on QEMU/KVM or Proxmox VE up to date.
 
+[![Mirror VirtIO & QEMU-GA from Fedora Archive](https://github.com/fs1n/Update-VirtIO-QemuGA/actions/workflows/mirror-virtio.yml/badge.svg)](https://github.com/fs1n/Update-VirtIO-QemuGA/actions/workflows/mirror-virtio.yml)
 
 ## Features
 
