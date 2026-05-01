@@ -49,7 +49,7 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 2.0.0
+    Version           : 1.1.0
     Author            : Frederik S. (fs1n)
     License           : MIT License
     GitHub            : fs1n/Update-VirtIO-QemuGA
@@ -60,12 +60,10 @@ param(
     [switch]$Force,
     [switch]$AutoCleanup,
     [switch]$AutoReboot,
-    [switch]$InstallVioSCSI,
-    [string]$VirtIOVersion  = "latest",
-    [string]$QemuGAVersion  = "latest"
+    [switch]$InstallVioSCSI
 )
 
-$ScriptVersion = "2.0.0"
+$ScriptVersion = "1.1.0"
 
 #Regtion Environment Validation
 
@@ -101,6 +99,11 @@ if ($PSVersionTable.PSVersion.Major -le 5) {
 
 #Region Variables
 
+# FPA is used as the alias/abbreviation for Fedora People Archive in the script
+$FPARootURL        = "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads"
+$ArchiveVirtIOURL  = "$FPARootURL/archive-virtio/"
+$ArchiveQemuGAURL  = "$FPARootURL/archive-qemu-ga/"
+
 $UninstallRegistryPaths = @(
     "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
     "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
@@ -130,9 +133,6 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 # In Previouse verion it was daily based witch to me was enoying.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
-
-$MirrorBaseURL = "https://github.com/fs1n/Update-VirtIO-QemuGA/releases/download/mirror-latest"
-$ManifestURL   = "$MirrorBaseURL/manifest.json"
 
 #EndRegion
 
@@ -325,22 +325,6 @@ function Install-MsiPackage {
     }
 }
 
-function Read-VersionChoice {
-    param(
-        [string]$ComponentName,
-        [array]$Versions
-    )
-    Write-Host "`nAvailable $ComponentName versions:" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Versions.Count; $i++) {
-        $tag = if ($i -eq 0) { " (latest)" } else { "" }
-        Write-Host "  [$($i + 1)] $($Versions[$i].version)$tag"
-    }
-    do {
-        $choice = Read-Host "Select version [1-$($Versions.Count)]"
-    } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $Versions.Count)
-    return $Versions[[int]$choice - 1]
-}
-
 #EndRegion
 
 #Region Script
@@ -406,92 +390,183 @@ catch {
     Write-Log -Message "Unable to retrieve QEMU Guest Agent version: $_" -Level "Warning"
 }
 
-# --- Fetch release manifest ---
-Write-Log -Message "Fetching release manifest from: $ManifestURL" -Level "Info"
+# --- Resolve latest VirtIO version from FPA ---
 try {
-    $manifestJson = Invoke-WebRequest -Uri $ManifestURL -UseBasicParsing -ErrorAction Stop
-    $manifest = $manifestJson.Content | ConvertFrom-Json
+    $FPAVirtIORootSite = Invoke-WebRequest -Uri $ArchiveVirtIOURL -UseBasicParsing -ErrorAction Stop
 }
 catch {
-    Write-Log -Message "Failed to fetch release manifest. Error: $_" -Level "Error"
+    Write-Log -Message "Failed to access Fedora People Archive at $ArchiveVirtIOURL. Error: $_" -Level "Error"
     exit 1
 }
 
-# --- Resolve VirtIO version ---
-if ($VirtIOVersion -eq "latest") {
-    $selectedVirtIO = $manifest.virtio[0]
-    if (-not $Force) {
-        Write-Host "`nLatest available VirtIO: $($selectedVirtIO.version)" -ForegroundColor Cyan
-        $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
-        if ($ans -notmatch 1) {
-            $selectedVirtIO = Read-VersionChoice -ComponentName "VirtIO" -Versions $manifest.virtio
-        }
-    }
+if ($FPAVirtIORootSite.StatusCode -ne 200) {
+    Write-Log -Message "Failed to access Fedora People Archive at $ArchiveVirtIOURL. Status Code: $($FPAVirtIORootSite.StatusCode)" -Level "Error"
+    exit 1
 }
-else {
-    $selectedVirtIO = $manifest.virtio | Where-Object { $_.version -eq $VirtIOVersion } | Select-Object -First 1
-    if (-not $selectedVirtIO) {
-        Write-Log -Message "VirtIO version '$VirtIOVersion' not found in mirror release. Available: $(($manifest.virtio | ForEach-Object { $_.version }) -join ', ')" -Level "Error"
-        exit 1
-    }
-}
-Write-Log -Message "Selected VirtIO version: $($selectedVirtIO.version)" -Level "Info"
 
-# --- Resolve QEMU-GA version ---
-if ($QemuGAVersion -eq "latest") {
-    $selectedQemuGA = $manifest.qemu_ga[0]
-    if (-not $Force) {
-        Write-Host "`nLatest available QEMU Guest Agent: $($selectedQemuGA.version)" -ForegroundColor Cyan
-        $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
-        if ($ans -notmatch 1) {
-            $selectedQemuGA = Read-VersionChoice -ComponentName "QEMU Guest Agent" -Versions $manifest.qemu_ga
-        }
-    }
-}
-else {
-    $selectedQemuGA = $manifest.qemu_ga | Where-Object { $_.version -eq $QemuGAVersion } | Select-Object -First 1
-    if (-not $selectedQemuGA) {
-        Write-Log -Message "QEMU-GA version '$QemuGAVersion' not found in mirror release. Available: $(($manifest.qemu_ga | ForEach-Object { $_.version }) -join ', ')" -Level "Error"
-        exit 1
-    }
-}
-Write-Log -Message "Selected QEMU-GA version: $($selectedQemuGA.version)" -Level "Info"
+Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveVirtIOURL" -Level "Info"
 
-# --- VirtIO: version comparison + install ---
+$FPAVirtIODirectoryLinks = $FPAVirtIORootSite.Links |
+    Where-Object { $_.href -match 'virtio-win-[\d\.]+-\d+/?$' } |
+    ForEach-Object {
+        $ver = [regex]::Match($_.href, 'virtio-win-([\d\.]+-\d+)').Groups[1].Value
+        [PSCustomObject]@{ Href = $_.href; Version = $ver }
+    }
+
+$VirtIOLatest = $FPAVirtIODirectoryLinks |
+    Sort-Object { [version]($_.Version -replace '-', '.') } -Descending |
+    Select-Object -First 1
+
+if ($null -eq $VirtIOLatest) {
+    Write-Log -Message "No matching virtio-win version folders found in $ArchiveVirtIOURL" -Level "Error"
+    exit 1
+}
+
 if (-not [string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
-    $installedVer = Get-VirtIOComparableVersion -VersionString $VirtIOCurrentVersion
-    $availableVer = Get-VirtIOComparableVersion -VersionString $selectedVirtIO.version
-    if ($null -ne $installedVer -and $null -ne $availableVer -and $installedVer -ge $availableVer) {
-        Write-Log -Message "VirtIO is already up-to-date (installed: $VirtIOCurrentVersion). Skipping." -Level "Info"
+    $VirtIOLocalComparableVersion  = Get-VirtIOComparableVersion -VersionString $VirtIOCurrentVersion
+    $VirtIORemoteComparableVersion = Get-VirtIOComparableVersion -VersionString $VirtIOLatest.Version
+
+    if ($null -eq $VirtIOLocalComparableVersion -or $null -eq $VirtIORemoteComparableVersion) {
+        Write-Log -Message "VirtIO version format is incompatible for comparison (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)'). VirtIO update will be skipped." -Level "Error"
         $SkipVirtIO = $true
+    }
+    elseif ($VirtIOLocalComparableVersion -ge $VirtIORemoteComparableVersion) {
+        Write-Log -Message "VirtIO is already up to date or newer (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)'). Skipping VirtIO installation." -Level "Info"
+        $SkipVirtIO = $true
+    }
+    else {
+        Write-Log -Message "VirtIO update required (local='$VirtIOCurrentVersion', remote='$($VirtIOLatest.Version)')." -Level "Info"
     }
 }
 
 if (-not $SkipVirtIO) {
-    $stem      = [System.IO.Path]::GetFileNameWithoutExtension($selectedVirtIO.file)
-    $assetName = "${stem}_$($selectedVirtIO.version).msi"
-    $url       = "$MirrorBaseURL/$assetName"
-    Install-MsiPackage -DisplayName "VirtIO" -MsiFileName $selectedVirtIO.file -DownloadURL $url
+    $FPAVirtIOLatestURL = ([Uri]::new([Uri]$ArchiveVirtIOURL, $VirtIOLatest.Href)).AbsoluteUri
+    if (-not $FPAVirtIOLatestURL.EndsWith('/')) { $FPAVirtIOLatestURL += '/' }
+
+    try {
+        $FPAVirtIOLatestSite = Invoke-WebRequest -Uri $FPAVirtIOLatestURL -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOLatestURL. Error: $_" -Level "Error"
+        exit 1
+    }
+
+    if ($FPAVirtIOLatestSite.StatusCode -ne 200) {
+        Write-Log -Message "Failed to access latest virtio-win directory at $FPAVirtIOLatestURL. Status Code: $($FPAVirtIOLatestSite.StatusCode)" -Level "Error"
+        exit 1
+    }
+
+    $VirtIOmsiLink = $FPAVirtIOLatestSite.Links | Where-Object { $_.href -eq $VirtIOmsiFileName } | Select-Object -First 1
+
+    if ($null -eq $VirtIOmsiLink) {
+        Write-Log -Message "Could not find $VirtIOmsiFileName in the latest directory." -Level "Error"
+        exit 1
+    }
+
+    $VirtIOmsiDownloadURL = $FPAVirtIOLatestURL + $VirtIOmsiFileName
+
+    Install-MsiPackage `
+        -DisplayName "VirtIO" `
+        -MsiFileName $VirtIOmsiFileName `
+        -DownloadURL $VirtIOmsiDownloadURL
 }
 
-# --- QEMU-GA: version comparison + install ---
+# --- Resolve latest QEMU GA version from FPA ---
+try {
+    $FPAQemuGARootSite = Invoke-WebRequest -Uri $ArchiveQemuGAURL -UseBasicParsing -ErrorAction Stop
+}
+catch {
+    Write-Log -Message "Failed to access Fedora People Archive at $ArchiveQemuGAURL. Error: $_" -Level "Error"
+    exit 1
+}
+
+if ($FPAQemuGARootSite.StatusCode -ne 200) {
+    Write-Log -Message "Failed to access Fedora People Archive at $ArchiveQemuGAURL. Status Code: $($FPAQemuGARootSite.StatusCode)" -Level "Error"
+    exit 1
+}
+
+Write-Log -Message "Successfully accessed Fedora People Archive at $ArchiveQemuGAURL" -Level "Info"
+
+$QemuGALatest = $FPAQemuGARootSite.Links |
+    Where-Object { $_.href -match '^qemu-ga-win-[\d.]+-\d+' } |
+    ForEach-Object {
+        $m = [regex]::Match($_.href, '^qemu-ga-win-([\d.]+)-(\d+)')
+        [PSCustomObject]@{
+            Href    = $_.href
+            Version = [version]$m.Groups[1].Value
+            Release = [int]$m.Groups[2].Value
+        }
+    } |
+    Sort-Object Version, Release -Descending |
+    Select-Object -First 1
+
+if ($null -eq $QemuGALatest) {
+    Write-Log -Message "No matching qemu-ga-win version folders found in $ArchiveQemuGAURL" -Level "Error"
+    exit 1
+}
+
 if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-    $installedVer = Get-VirtIOComparableVersion -VersionString $QemuGACurrentVersion
-    $availableVer = Get-VirtIOComparableVersion -VersionString $selectedQemuGA.version
-    if ($null -ne $installedVer -and $null -ne $availableVer -and $installedVer -ge $availableVer) {
-        Write-Log -Message "QEMU Guest Agent is already up-to-date (installed: $QemuGACurrentVersion). Skipping." -Level "Info"
+    try {
+        $QemuGALocalVersion  = [version]$QemuGACurrentVersion
+        $QemuGARemoteVersion = $QemuGALatest.Version
+    }
+    catch {
+        Write-Log -Message "QEMU Guest Agent version format is incompatible for comparison (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)'). QEMU Guest Agent update will be skipped." -Level "Error"
         $SkipQemuGA = $true
+    }
+
+    if (-not $SkipQemuGA) {
+        if ($QemuGALocalVersion -ge $QemuGARemoteVersion) {
+            Write-Log -Message "QEMU Guest Agent is already up to date or newer (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)'). Skipping QEMU Guest Agent installation." -Level "Info"
+            $SkipQemuGA = $true
+        }
+        else {
+            Write-Log -Message "QEMU Guest Agent update required (local='$QemuGACurrentVersion', remote='$($QemuGALatest.Version)')." -Level "Info"
+        }
     }
 }
 
 if (-not $SkipQemuGA) {
-    $stem      = [System.IO.Path]::GetFileNameWithoutExtension($selectedQemuGA.file)
-    $assetName = "${stem}_$($selectedQemuGA.version).msi"
-    $url       = "$MirrorBaseURL/$assetName"
-    Install-MsiPackage -DisplayName "QEMU Guest Agent" -MsiFileName $selectedQemuGA.file -DownloadURL $url
+    $FPAQemuGALatestURL = ([Uri]::new([Uri]$ArchiveQemuGAURL, $QemuGALatest.Href)).AbsoluteUri
+    if (-not $FPAQemuGALatestURL.EndsWith('/')) { $FPAQemuGALatestURL += '/' }
+
+    Write-Log -Message "Selected latest QEMU GA folder: $($QemuGALatest.Href) (Version=$($QemuGALatest.Version), Release=$($QemuGALatest.Release))" -Level "Info"
+
+    try {
+        $FPAQemuGALatestSite = Invoke-WebRequest -Uri $FPAQemuGALatestURL -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        Write-Log -Message "Failed to access latest qemu-ga directory at $FPAQemuGALatestURL. Error: $_" -Level "Error"
+        exit 1
+    }
+
+    if ($FPAQemuGALatestSite.StatusCode -ne 200) {
+        Write-Log -Message "Failed to access latest qemu-ga directory at $FPAQemuGALatestURL. Status Code: $($FPAQemuGALatestSite.StatusCode)" -Level "Error"
+        exit 1
+    }
+
+    $QemuGAMsiLink     = $null
+    $QemuGAmsiFileName = $null
+    foreach ($msiCandidate in $QemuGAmsiCandidates) {
+        $QemuGAMsiLink = $FPAQemuGALatestSite.Links | Where-Object { $_.href -eq $msiCandidate } | Select-Object -First 1
+        if ($null -ne $QemuGAMsiLink) {
+            $QemuGAmsiFileName = $msiCandidate
+            break
+        }
+    }
+
+    if ($null -eq $QemuGAMsiLink -or [string]::IsNullOrWhiteSpace($QemuGAmsiFileName)) {
+        Write-Log -Message "Could not find a supported QEMU Guest Agent MSI file in the latest directory. Checked: $($QemuGAmsiCandidates -join ', ')" -Level "Error"
+        exit 1
+    }
+
+    $QemuGAmsiDownloadURL = $FPAQemuGALatestURL + $QemuGAmsiFileName
+
+    Install-MsiPackage `
+        -DisplayName "QEMU Guest Agent" `
+        -MsiFileName $QemuGAmsiFileName `
+        -DownloadURL $QemuGAmsiDownloadURL
 }
-
-
 
 # --- Reboot handling ---
 if ($script:RebootRequired) {
