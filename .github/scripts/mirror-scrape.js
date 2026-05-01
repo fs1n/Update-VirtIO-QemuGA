@@ -1,10 +1,10 @@
 /**
  * mirror-scrape.js
- * Scrapet fedorapeople.org (Anubis-protected) via Playwright Chromium,
- * extrahiert die letzten N Versionen von VirtIO und QEMU-GA,
- * lädt die MSIs herunter und schreibt ein manifest.json.
+ * Scrapes fedorapeople.org (Anubis-protected) via Playwright Chromium,
+ * extracts the latest N versions of VirtIO and QEMU-GA,
+ * downloads the MSIs and writes a manifest.json.
  *
- * Ausgabe: ./mirror-out/<component>/<version>/<file>.msi
+ * Output: ./mirror-out/<component>/<version>/<file>.msi
  */
 
 const { chromium } = require('playwright');
@@ -30,30 +30,30 @@ function ensureDir(p) {
 }
 
 /**
- * Navigiert zu einer URL mit Playwright und wartet bis Anubis-Challenge
- * gelöst ist (erkennbar daran dass der echte Seiteninhalt geladen ist).
- * Gibt den kompletten HTML-Body zurück.
+ * Navigates to a URL with Playwright and waits until the Anubis challenge
+ * is resolved (indicated by the actual page content being loaded).
+ * Returns the complete HTML body.
  */
 async function fetchWithBrowser(page, url, waitSelector = 'body', timeout = 30000) {
   console.log(`  [browser] → ${url}`);
   await page.goto(url, { waitUntil: 'networkidle', timeout });
 
-  // Anubis zeigt einen "Checking your browser"-Text solange der PoW läuft.
-  // Wir warten bis dieser Text weg ist und echter Content da ist.
+  // Anubis shows a "Checking your browser" text while the PoW is running.
+  // We wait until this text is gone and actual content is present.
   try {
     await page.waitForFunction(
       () => !document.body.innerText.includes('Checking your browser'),
       { timeout }
     );
   } catch {
-    // Falls kein Anubis-Check, einfach weitermachen
+    // If no Anubis check, just continue
   }
 
   return page.content();
 }
 
 /**
- * Extrahiert alle <a href> Links aus einem HTML-String.
+ * Extracts all <a href> links from an HTML string.
  */
 function extractLinks(html) {
   const matches = [...html.matchAll(/href="([^"]+)"/gi)];
@@ -61,9 +61,9 @@ function extractLinks(html) {
 }
 
 /**
- * Lädt eine Datei per HTTP(S) herunter. Folgt Redirects.
- * Playwright-Cookies werden als Header mitgegeben damit
- * der Download nicht erneut geblockt wird.
+ * Downloads a file via HTTP(S). Follows redirects.
+ * Playwright cookies are provided as headers so
+ * the download is not blocked again.
  */
 async function downloadFile(url, destPath, cookies = []) {
   return new Promise((resolve, reject) => {
@@ -79,12 +79,12 @@ async function downloadFile(url, destPath, cookies = []) {
 
     function doGet(targetUrl) {
       get(targetUrl, options, res => {
-        // Redirect folgen
+        // Follow redirects
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           return doGet(res.headers.location);
         }
         if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode} für ${targetUrl}`));
+          return reject(new Error(`HTTP ${res.statusCode} for ${targetUrl}`));
         }
 
         const total = parseInt(res.headers['content-length'] || '0', 10);
@@ -148,7 +148,7 @@ async function downloadFile(url, destPath, cookies = []) {
       })
       .slice(0, KEEP_VERSIONS);
 
-    console.log(`  Gefunden (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
+    console.log(`  Found (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
 
     for (const v of virtioVersions) {
       const dirUrl  = `${VIRTIO_ARCHIVE}${v.href}/`;
@@ -156,7 +156,7 @@ async function downloadFile(url, destPath, cookies = []) {
       const fileLinks = extractLinks(dirHtml);
 
       if (!fileLinks.includes(VIRTIO_MSI)) {
-        console.warn(`  ⚠️  ${VIRTIO_MSI} nicht in ${dirUrl} gefunden, überspringe.`);
+        console.warn(` ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
         continue;
       }
 
@@ -166,9 +166,9 @@ async function downloadFile(url, destPath, cookies = []) {
       ensureDir(destDir);
 
       if (fs.existsSync(destFile)) {
-        console.log(`  ✓ bereits vorhanden: ${v.version}/${VIRTIO_MSI}`);
+        console.log(`  ✓ already present: ${v.version}/${VIRTIO_MSI}`);
       } else {
-        console.log(`  ↓ Lade ${v.version}/${VIRTIO_MSI} ...`);
+        console.log(`  ↓ Downloading ${v.version}/${VIRTIO_MSI} ...`);
         const cookies = await context.cookies();
         await downloadFile(msiUrl, destFile, cookies);
         console.log(`  ✓ ${v.version}/${VIRTIO_MSI}`);
@@ -200,7 +200,7 @@ async function downloadFile(url, destPath, cookies = []) {
       })
       .slice(0, KEEP_VERSIONS);
 
-    console.log(`  Gefunden (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
+    console.log(`  Found (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
 
     for (const v of qemuVersions) {
       const dirUrl  = `${QEMUGA_ARCHIVE}${v.href}/`;
@@ -213,7 +213,7 @@ async function downloadFile(url, destPath, cookies = []) {
       }
 
       if (!msiFile) {
-        console.warn(`  ⚠️  Kein passender MSI-Kandidat in ${dirUrl}, überspringe.`);
+        console.warn(` No matching MSI candidate in ${dirUrl}, skipping.`);
         continue;
       }
 
@@ -224,9 +224,9 @@ async function downloadFile(url, destPath, cookies = []) {
       ensureDir(destDir);
 
       if (fs.existsSync(destFile)) {
-        console.log(`  ✓ bereits vorhanden: ${verTag}/${msiFile}`);
+        console.log(`  ✓ already present: ${verTag}/${msiFile}`);
       } else {
-        console.log(`  ↓ Lade ${verTag}/${msiFile} ...`);
+        console.log(`  ↓ Downloading ${verTag}/${msiFile} ...`);
         const cookies = await context.cookies();
         await downloadFile(msiUrl, destFile, cookies);
         console.log(`  ✓ ${verTag}/${msiFile}`);
@@ -239,8 +239,8 @@ async function downloadFile(url, destPath, cookies = []) {
     await browser.close();
   }
 
-  // ── Manifest schreiben ──────────────────────────────────────────────
+  // ── Write manifest ──────────────────────────────────────────────
   const manifestPath = path.join(OUT_DIR, 'manifest.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  console.log(`\n✅ manifest.json geschrieben:\n${JSON.stringify(manifest, null, 2)}`);
+  console.log(`\n manifest.json written:\n${JSON.stringify(manifest, null, 2)}`);
 })();
