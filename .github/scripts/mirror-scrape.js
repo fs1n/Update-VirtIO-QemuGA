@@ -1,6 +1,6 @@
 /**
  * mirror-scrape.js
- * Scrapet fedorapeople.org (Anubis-geschützt) via Playwright Chromium,
+ * Scrapet fedorapeople.org (Anubis-protected) via Playwright Chromium,
  * extrahiert die letzten N Versionen von VirtIO und QEMU-GA,
  * lädt die MSIs herunter und schreibt ein manifest.json.
  *
