@@ -1,0 +1,70 @@
+name: Mirror VirtIO & QEMU-GA from Fedora Archive
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # täglich 03:00 UTC
+  workflow_dispatch:        # manuell auslösbar
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      S3_BUCKET:    ${{ secrets.SYNOLOGY_S3_BUCKET }}
+      S3_ENDPOINT:  ${{ secrets.SYNOLOGY_S3_ENDPOINT }}   # z.B. https://nas.example.com:9000
+      S3_REGION:    ${{ secrets.SYNOLOGY_S3_REGION }}     # z.B. us-east-1 (Synology braucht irgendeinen Wert)
+      AWS_ACCESS_KEY_ID:     ${{ secrets.SYNOLOGY_S3_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SYNOLOGY_S3_SECRET }}
+      KEEP_VERSIONS: "3"
+
+    steps:
+
+      # ── 1. Repo auschecken ────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Node + Playwright ──────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright + Chromium
+        run: |
+          npm install playwright
+          npx playwright install chromium --with-deps
+
+      # ── 3. AWS CLI (S3-kompatibel via --endpoint-url) ─────────────────────
+      - name: Install AWS CLI
+        run: |
+          pip install awscli --quiet
+
+      # ── 4. Scrape + Download via Playwright ───────────────────────────────
+      - name: Scrape Fedora Archive and download MSIs
+        run: node .github/scripts/mirror-scrape.js
+        env:
+          KEEP_VERSIONS: ${{ env.KEEP_VERSIONS }}
+
+      # ── 5. Upload zu Synology S3 ──────────────────────────────────────────
+      - name: Upload to Synology S3
+        run: |
+          aws s3 sync ./mirror-out/ s3://$S3_BUCKET/virtio-mirror/ \
+            --endpoint-url "$S3_ENDPOINT" \
+            --region "$S3_REGION" \
+            --no-progress \
+            --only-show-errors
+
+      # ── 6. Zusammenfassung in Job Summary ─────────────────────────────────
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Mirror Run $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f mirror-out/manifest.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat mirror-out/manifest.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ manifest.json nicht gefunden – Scraping fehlgeschlagen?" >> $GITHUB_STEP_SUMMARY
+          fi
