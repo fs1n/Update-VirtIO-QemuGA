@@ -11,11 +11,11 @@ jobs:
     timeout-minutes: 60
 
     env:
-      S3_BUCKET:    ${{ secrets.SYNOLOGY_S3_BUCKET }}
-      S3_ENDPOINT:  ${{ secrets.SYNOLOGY_S3_ENDPOINT }}   # z.B. https://nas.example.com:9000
-      S3_REGION:    ${{ secrets.SYNOLOGY_S3_REGION }}     # z.B. us-east-1 (Synology braucht irgendeinen Wert)
-      AWS_ACCESS_KEY_ID:     ${{ secrets.SYNOLOGY_S3_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.SYNOLOGY_S3_SECRET }}
+      S3_BUCKET:   ${{ secrets.SYNOLOGY_S3_BUCKET }}
+      S3_ENDPOINT: ${{ secrets.SYNOLOGY_S3_ENDPOINT }}  # https://eu-central-1.s3.synologyc2.net
+      S3_REGION:   ${{ secrets.SYNOLOGY_S3_REGION }}    # eu-central-1
+      S3_KEY:      ${{ secrets.SYNOLOGY_S3_KEY }}
+      S3_SECRET:   ${{ secrets.SYNOLOGY_S3_SECRET }}
       KEEP_VERSIONS: "3"
 
     steps:
@@ -35,10 +35,26 @@ jobs:
           npm install playwright
           npx playwright install chromium --with-deps
 
-      # ── 3. AWS CLI (S3-kompatibel via --endpoint-url) ─────────────────────
-      - name: Install AWS CLI
+      # ── 3. rclone (awscli v2 nutzt aws-chunked, was C2 nicht unterstützt) ─
+      - name: Install rclone
+        run: curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone for Synology C2
         run: |
-          pip install awscli --quiet
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [c2]
+          type = s3
+          provider = Other
+          access_key_id = $S3_KEY
+          secret_access_key = $S3_SECRET
+          region = $S3_REGION
+          endpoint = $S3_ENDPOINT
+          no_check_bucket = true
+          upload_cutoff = 5G
+          chunk_size = 5G
+          disable_checksum = true
+          EOF
 
       # ── 4. Scrape + Download via Playwright ───────────────────────────────
       - name: Scrape Fedora Archive and download MSIs
@@ -46,14 +62,14 @@ jobs:
         env:
           KEEP_VERSIONS: ${{ env.KEEP_VERSIONS }}
 
-      # ── 5. Upload zu Synology S3 ──────────────────────────────────────────
-      - name: Upload to Synology S3
+      # ── 5. Upload zu Synology C2 via rclone ──────────────────────────────
+      - name: Upload to Synology C2
         run: |
-          aws s3 sync ./mirror-out/ s3://$S3_BUCKET/virtio-mirror/ \
-            --endpoint-url "$S3_ENDPOINT" \
-            --region "$S3_REGION" \
-            --no-progress \
-            --only-show-errors
+          rclone sync ./mirror-out/ c2:$S3_BUCKET/virtio-mirror/ \
+            --progress \
+            --transfers 2 \
+            --retries 3 \
+            --log-level INFO
 
       # ── 6. Zusammenfassung in Job Summary ─────────────────────────────────
       - name: Write job summary
