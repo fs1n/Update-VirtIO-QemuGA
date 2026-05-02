@@ -15,7 +15,6 @@ jobs:
 
     env:
       KEEP_VERSIONS: "3"
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
 
@@ -33,38 +32,26 @@ jobs:
           npm install playwright
           npx playwright install chromium --with-deps
 
-      # Scrape fedorapeople.org and download the last 3 versions of VirtIO + QEMU-GA MSIs
-      - name: Scrape and download MSIs
+      # Scrape fedorapeople.org and write manifest.json with direct Fedora download URLs
+      - name: Generate manifest
         run: node .github/scripts/mirror-scrape.js
 
-      # Rename MSIs to include version in filename so all assets have unique names in the release.
-      # GitHub release assets are identified by basename only — uploading multiple files with the
-      # same name in one command causes HTTP 404 even with --clobber.
-      # Result: virtio-win-gt-x64.msi → virtio-win-gt-x64_0.1.285-1.msi, etc.
-      - name: Rename MSIs with version suffix
+      # Commit manifest.json to main so the PS1 script can fetch it directly
+      - name: Commit manifest to main
         run: |
-          find mirror-out -name "*.msi" | while read f; do
-            version=$(basename "$(dirname "$f")")
-            dir=$(dirname "$f")
-            name=$(basename "$f" .msi)
-            mv "$f" "${dir}/${name}_${version}.msi"
-          done
-
-      # Upload all MSIs and the manifest, replacing existing assets with --clobber
-      - name: Upload assets to mirror-latest
-        run: |
-          FILES=$(find mirror-out -name "*.msi" -o -name "manifest.json" | tr '\n' ' ')
-          gh release upload "mirror-latest" $FILES --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git diff --staged --quiet || git commit -m "chore: update manifest.json [skip ci]"
+          git push
 
       - name: Write job summary
         if: always()
         run: |
           echo "## Mirror Run $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-          if [ -f mirror-out/manifest.json ]; then
+          if [ -f manifest.json ]; then
             echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat mirror-out/manifest.json >> $GITHUB_STEP_SUMMARY
+            cat manifest.json >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "manifest.json not found — scraping may have failed" >> $GITHUB_STEP_SUMMARY

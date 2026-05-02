@@ -137,8 +137,7 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
-$MirrorBaseURL = "https://github.com/fs1n/Update-VirtIO-QemuGA/releases/download/mirror-latest"
-$ManifestURL   = "$MirrorBaseURL/manifest.json"
+$ManifestURL = "https://raw.githubusercontent.com/fs1n/Update-VirtIO-QemuGA/refs/heads/main/manifest.json"
 
 #EndRegion
 
@@ -485,10 +484,7 @@ if (-not [string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
 }
 
 if (-not $SkipVirtIO) {
-    $stem      = [System.IO.Path]::GetFileNameWithoutExtension($selectedVirtIO.file)
-    $assetName = "${stem}_$($selectedVirtIO.version).msi"
-    $url       = "$MirrorBaseURL/$assetName"
-    Install-MsiPackage -DisplayName "VirtIO" -MsiFileName $selectedVirtIO.file -DownloadURL $url
+    Install-MsiPackage -DisplayName "VirtIO" -MsiFileName $selectedVirtIO.file -DownloadURL $selectedVirtIO.url
 }
 
 # --- QEMU-GA: version comparison + install ---
@@ -502,10 +498,7 @@ if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
 }
 
 if (-not $SkipQemuGA) {
-    $stem      = [System.IO.Path]::GetFileNameWithoutExtension($selectedQemuGA.file)
-    $assetName = "${stem}_$($selectedQemuGA.version).msi"
-    $url       = "$MirrorBaseURL/$assetName"
-    Install-MsiPackage -DisplayName "QEMU Guest Agent" -MsiFileName $selectedQemuGA.file -DownloadURL $url
+    Install-MsiPackage -DisplayName "QEMU Guest Agent" -MsiFileName $selectedQemuGA.file -DownloadURL $selectedQemuGA.url
 }
 
 

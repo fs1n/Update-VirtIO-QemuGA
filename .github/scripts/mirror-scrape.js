@@ -2,32 +2,25 @@
  * mirror-scrape.js
  * Scrapes fedorapeople.org (Anubis-protected) via Playwright Chromium,
  * extracts the latest N versions of VirtIO and QEMU-GA,
- * downloads the MSIs and writes a manifest.json.
+ * and writes a manifest.json with direct Fedora download URLs.
  *
- * Output: ./mirror-out/<component>/<version>/<file>.msi
+ * Output: ./manifest.json
  */
 
 const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
-const https = require('https');
-const http  = require('http');
 
 // ── Config ────────────────────────────────────────────────────────────────
 const KEEP_VERSIONS  = parseInt(process.env.KEEP_VERSIONS || '3', 10);
-const OUT_DIR        = path.resolve('./mirror-out');
 const FPA_BASE       = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads';
 const VIRTIO_ARCHIVE = `${FPA_BASE}/archive-virtio/`;
 const QEMUGA_ARCHIVE = `${FPA_BASE}/archive-qemu-ga/`;
 
-const VIRTIO_MSI     = 'virtio-win-gt-x64.msi';
+const VIRTIO_MSI            = 'virtio-win-gt-x64.msi';
 const QEMUGA_MSI_CANDIDATES = ['qemu-ga-x86_64.msi', 'qemu-ga-x64.msi'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
-}
 
 /**
  * Navigates to a URL with Playwright and waits until the Anubis challenge
@@ -69,62 +62,9 @@ function hrefBasename(href) {
   return href.replace(/\/$/, '').split('/').pop();
 }
 
-/**
- * Downloads a file via HTTP(S). Follows redirects.
- * Playwright cookies are provided as headers so
- * the download is not blocked again.
- */
-async function downloadFile(url, destPath, cookies = []) {
-  return new Promise((resolve, reject) => {
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-    const options = {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-        ...(cookieHeader ? { Cookie: cookieHeader } : {})
-      }
-    };
-
-    const get = url.startsWith('https') ? https.get : http.get;
-
-    function doGet(targetUrl) {
-      get(targetUrl, options, res => {
-        // Follow redirects
-        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-          return doGet(res.headers.location);
-        }
-        if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode} for ${targetUrl}`));
-        }
-
-        const total = parseInt(res.headers['content-length'] || '0', 10);
-        let received = 0;
-        let lastPct  = -1;
-
-        const file = fs.createWriteStream(destPath);
-        res.on('data', chunk => {
-          received += chunk.length;
-          if (total > 0) {
-            const pct = Math.floor((received / total) * 100);
-            if (pct !== lastPct && pct % 10 === 0) {
-              process.stdout.write(`\r    ${pct}% (${(received/1024/1024).toFixed(1)} / ${(total/1024/1024).toFixed(1)} MB)`);
-              lastPct = pct;
-            }
-          }
-        });
-        res.pipe(file);
-        file.on('finish', () => { process.stdout.write('\n'); file.close(resolve); });
-        file.on('error', reject);
-      }).on('error', reject);
-    }
-
-    doGet(url);
-  });
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────
 
 (async () => {
-  ensureDir(OUT_DIR);
   const manifest = { generated: new Date().toISOString(), virtio: [], qemu_ga: [] };
 
   const browser = await chromium.launch({ headless: true });
@@ -161,29 +101,17 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log(`  Found (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
 
     for (const v of virtioVersions) {
-      const dirUrl  = `${VIRTIO_ARCHIVE}${v.basename}/`;
-      const dirHtml = await fetchWithBrowser(page, dirUrl);
+      const dirUrl      = `${VIRTIO_ARCHIVE}${v.basename}/`;
+      const dirHtml     = await fetchWithBrowser(page, dirUrl);
       const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
       if (!fileBasenames.includes(VIRTIO_MSI)) {
-        console.warn(` ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
+        console.warn(`  ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
         continue;
       }
 
-      const msiUrl  = `${dirUrl}${VIRTIO_MSI}`;
-      const destDir = path.join(OUT_DIR, 'virtio', v.version);
-      const destFile = path.join(destDir, VIRTIO_MSI);
-      ensureDir(destDir);
-
-      if (fs.existsSync(destFile)) {
-        console.log(`  ✓ already present: ${v.version}/${VIRTIO_MSI}`);
-      } else {
-        console.log(`  ↓ Downloading ${v.version}/${VIRTIO_MSI} ...`);
-        const cookies = await context.cookies();
-        await downloadFile(msiUrl, destFile, cookies);
-        console.log(`  ✓ ${v.version}/${VIRTIO_MSI}`);
-      }
-
+      const msiUrl = `${dirUrl}${VIRTIO_MSI}`;
+      console.log(`  ✓ ${v.version}/${VIRTIO_MSI} → ${msiUrl}`);
       manifest.virtio.push({ version: v.version, file: VIRTIO_MSI, url: msiUrl });
     }
 
@@ -214,8 +142,8 @@ async function downloadFile(url, destPath, cookies = []) {
     console.log(`  Found (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
 
     for (const v of qemuVersions) {
-      const dirUrl  = `${QEMUGA_ARCHIVE}${v.basename}/`;
-      const dirHtml = await fetchWithBrowser(page, dirUrl);
+      const dirUrl      = `${QEMUGA_ARCHIVE}${v.basename}/`;
+      const dirHtml     = await fetchWithBrowser(page, dirUrl);
       const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
       let msiFile = null;
@@ -224,34 +152,22 @@ async function downloadFile(url, destPath, cookies = []) {
       }
 
       if (!msiFile) {
-        console.warn(` No matching MSI candidate in ${dirUrl}, skipping.`);
+        console.warn(`  No matching MSI candidate in ${dirUrl}, skipping.`);
         continue;
       }
 
-      const msiUrl   = `${dirUrl}${msiFile}`;
-      const verTag   = `${v.version}-${v.release}`;
-      const destDir  = path.join(OUT_DIR, 'qemu-ga', verTag);
-      const destFile = path.join(destDir, msiFile);
-      ensureDir(destDir);
-
-      if (fs.existsSync(destFile)) {
-        console.log(`  ✓ already present: ${verTag}/${msiFile}`);
-      } else {
-        console.log(`  ↓ Downloading ${verTag}/${msiFile} ...`);
-        const cookies = await context.cookies();
-        await downloadFile(msiUrl, destFile, cookies);
-        console.log(`  ✓ ${verTag}/${msiFile}`);
-      }
-
-      manifest['qemu_ga'].push({ version: verTag, file: msiFile, url: msiUrl });
+      const msiUrl = `${dirUrl}${msiFile}`;
+      const verTag = `${v.version}-${v.release}`;
+      console.log(`  ✓ ${verTag}/${msiFile} → ${msiUrl}`);
+      manifest.qemu_ga.push({ version: verTag, file: msiFile, url: msiUrl });
     }
 
   } finally {
     await browser.close();
   }
 
-  // ── Write manifest ──────────────────────────────────────────────
-  const manifestPath = path.join(OUT_DIR, 'manifest.json');
+  // ── Write manifest ────────────────────────────────────────────────────
+  const manifestPath = path.resolve('./manifest.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  console.log(`\n manifest.json written:\n${JSON.stringify(manifest, null, 2)}`);
+  console.log(`\nmanifest.json written:\n${JSON.stringify(manifest, null, 2)}`);
 })();
