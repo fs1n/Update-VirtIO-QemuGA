@@ -1,0 +1,71 @@
+name: Mirror VirtIO & QEMU-GA from Fedora Archive
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      KEEP_VERSIONS: "3"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Playwright + Chromium solves the Anubis PoW challenge on fedorapeople.org
+      - name: Install Playwright and Chromium
+        run: |
+          npm install playwright
+          npx playwright install chromium --with-deps
+
+      # Scrape fedorapeople.org and download the last 3 versions of VirtIO + QEMU-GA MSIs
+      - name: Scrape and download MSIs
+        run: node .github/scripts/mirror-scrape.js
+
+      # Rename MSIs to include version in filename so all assets have unique names in the release.
+      # GitHub release assets are identified by basename only — uploading multiple files with the
+      # same name in one command causes HTTP 404 even with --clobber.
+      # Result: virtio-win-gt-x64.msi → virtio-win-gt-x64_0.1.285-1.msi, etc.
+      - name: Rename MSIs with version suffix
+        run: |
+          find mirror-out -name "*.msi" | while read f; do
+            version=$(basename "$(dirname "$f")")
+            dir=$(dirname "$f")
+            name=$(basename "$f" .msi)
+            mv "$f" "${dir}/${name}_${version}.msi"
+          done
+
+      # Upload all MSIs and the manifest, replacing existing assets with --clobber
+      - name: Upload assets to mirror-latest
+        run: |
+          FILES=$(find mirror-out -name "*.msi" -o -name "manifest.json" | tr '\n' ' ')
+          gh release upload "mirror-latest" $FILES --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Mirror Run $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          if [ -f mirror-out/manifest.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat mirror-out/manifest.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "manifest.json not found — scraping may have failed" >> $GITHUB_STEP_SUMMARY
+          fi
