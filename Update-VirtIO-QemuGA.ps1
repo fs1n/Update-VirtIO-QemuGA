@@ -25,6 +25,12 @@
     Use this switch when running from an RMM tool or other automated context.
     Has no effect if a vioscsi device is already present.
 
+.PARAMETER VirtIOVersion
+    Specify a particular VirtIO version to install (e.g. "0.1.285"). Default is "latest" which selects the newest available version from the manifest.
+
+.PARAMETER QemuGAVersion
+    Specify a particular QEMU Guest Agent version to install (e.g. "0.1.285"). Default is "latest" which selects the newest available version from the manifest.
+
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1
     Runs the script interactively, downloads the latest VirtIO MSI, installs it, and prompts for cleanup.

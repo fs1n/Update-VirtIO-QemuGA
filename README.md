@@ -7,14 +7,14 @@
 
 # Update-VirtIO-QemuGA
 
-A PowerShell script to automatically update **VirtIO Windows drivers** and the **QEMU Guest Agent** from the [Fedora People Archive](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads). Useful for keeping Windows VMs on QEMU/KVM or Proxmox VE up to date.
+A PowerShell script to automatically update **VirtIO Windows drivers** and the **QEMU Guest Agent**.
+Useful for keeping Windows VMs on QEMU/KVM or Proxmox VE up to date.
 
 [![Mirror VirtIO & QEMU-GA from Fedora Archive](https://github.com/fs1n/Update-VirtIO-QemuGA/actions/workflows/mirror-virtio.yml/badge.svg)](https://github.com/fs1n/Update-VirtIO-QemuGA/actions/workflows/mirror-virtio.yml)
 
 ## Features
 
 - Detects currently installed versions and skips updates when already up to date
-- Resolves and downloads the latest MSI from the Fedora People Archive
 - Checks for a `vioscsi` device and offers to also run a Script to install a dummy `vioscsi` device for seemless migration to e.g. Proxmox VE
 - Compatible with **PowerShell 5.1** and **PowerShell 7**
 - Non-interactive mode for use in scheduled tasks or RMM tools
@@ -22,9 +22,9 @@ A PowerShell script to automatically update **VirtIO Windows drivers** and the *
 
 ## Requirements
 
-- Some Windows OS
+- Some Windows OS (Tested on Windows 11, Server 22 and Server 25)
 - **Administrator privileges**
-- Internet access and connection to `fedorapeople.org` & **THE** GitHub Domains
+- Internet access
 
 
 ## Usage
@@ -67,7 +67,8 @@ e.g. :
 | `-AutoCleanup` | Deletes downloaded MSI files after installation without prompting |
 | `-AutoReboot` | Reboots automatically if required (exit code 3010), without prompting |
 | `-InstallVioSCSI` | Automatically installs the vioscsi dummy device without prompting |
-
+| `-VirtIOVersion` | Pin one of 3 available VirtIO versions to install |
+| `-QemuGAVersion` | Pin one of 3 available Qemu GA versions to install |
 
 ## Logs
 
