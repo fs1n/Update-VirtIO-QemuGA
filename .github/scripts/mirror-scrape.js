@@ -5,6 +5,9 @@
  * with direct Fedora download URLs.
  *
  * Output: ./manifest.json
+ *
+ * Set BROWSER_PROFILE_DIR to a persistent path so Anubis cookies survive
+ * between runs (paired with actions/cache in the workflow).
  */
 
 const { chromium } = require('playwright');
@@ -20,6 +23,8 @@ const QEMUGA_ARCHIVE = `${FPA_BASE}/archive-qemu-ga/`;
 const VIRTIO_MSI            = 'virtio-win-gt-x64.msi';
 // QEMU-GA changed filename at some point; check both candidates per directory.
 const QEMUGA_MSI_CANDIDATES = ['qemu-ga-x86_64.msi', 'qemu-ga-x64.msi'];
+
+const PROFILE_DIR = process.env.BROWSER_PROFILE_DIR || '/tmp/playwright-profile';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -98,10 +103,21 @@ function hrefBasename(href) {
 (async () => {
   const manifest = { generated: new Date().toISOString(), virtio: [], qemu_ga: [] };
 
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36'
+  // launchPersistentContext stores cookies/localStorage in PROFILE_DIR so
+  // a solved Anubis PoW cookie survives across workflow runs (via actions/cache).
+  // --disable-blink-features=AutomationControlled removes the automation flag
+  // that bot-detection systems read via navigator.webdriver.
+  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+    headless: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+    args: ['--disable-blink-features=AutomationControlled'],
   });
+
+  // Hide the remaining webdriver signal that the args flag alone doesn't cover.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+
   const page = await context.newPage();
 
   try {
@@ -189,7 +205,7 @@ function hrefBasename(href) {
     }
 
   } finally {
-    await browser.close();
+    await context.close();
   }
 
   // ── Write manifest ────────────────────────────────────────────────────
