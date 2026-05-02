@@ -1,8 +1,8 @@
 /**
  * mirror-scrape.js
  * Scrapes fedorapeople.org (Anubis-protected) via Playwright Chromium,
- * extracts the latest N versions of VirtIO and QEMU-GA,
- * and writes a manifest.json with direct Fedora download URLs.
+ * finds ALL versions of VirtIO and QEMU-GA, and writes manifest.json
+ * with direct Fedora download URLs.
  *
  * Output: ./manifest.json
  */
@@ -12,37 +12,68 @@ const fs   = require('fs');
 const path = require('path');
 
 // ── Config ────────────────────────────────────────────────────────────────
-const KEEP_VERSIONS  = parseInt(process.env.KEEP_VERSIONS || '3', 10);
 const FPA_BASE       = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads';
 const VIRTIO_ARCHIVE = `${FPA_BASE}/archive-virtio/`;
 const QEMUGA_ARCHIVE = `${FPA_BASE}/archive-qemu-ga/`;
 
+// VirtIO MSI filename is stable across all archive versions.
 const VIRTIO_MSI            = 'virtio-win-gt-x64.msi';
+// QEMU-GA changed filename at some point; check both candidates per directory.
 const QEMUGA_MSI_CANDIDATES = ['qemu-ga-x86_64.msi', 'qemu-ga-x64.msi'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 /**
- * Navigates to a URL with Playwright and waits until the Anubis challenge
- * is resolved (indicated by the actual page content being loaded).
- * Returns the complete HTML body.
+ * Navigates to a URL with Playwright, waits for the Anubis PoW challenge
+ * to resolve, and validates that real directory-listing content loaded.
+ * Retries up to 3 times before throwing.
  */
-async function fetchWithBrowser(page, url, waitSelector = 'body', timeout = 30000) {
-  console.log(`  [browser] → ${url}`);
-  await page.goto(url, { waitUntil: 'networkidle', timeout });
+async function fetchWithBrowser(page, url, timeout = 60000) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      console.log(`  [browser] retry ${attempt}/3 → ${url}`);
+      await new Promise(r => setTimeout(r, 3000 * (attempt - 1)));
+    } else {
+      console.log(`  [browser] → ${url}`);
+    }
 
-  // Anubis shows a "Checking your browser" text while the PoW is running.
-  // We wait until this text is gone and actual content is present.
-  try {
-    await page.waitForFunction(
-      () => !document.body.innerText.includes('Checking your browser'),
-      { timeout }
-    );
-  } catch {
-    // If no Anubis check, just continue
+    try {
+      await page.goto(url, { waitUntil: 'networkidle', timeout });
+
+      // Anubis shows "Checking your browser" while the PoW runs.
+      // Wait until that text is gone.
+      try {
+        await page.waitForFunction(
+          () => !document.body.innerText.includes('Checking your browser'),
+          { timeout }
+        );
+      } catch {
+        // No Anubis challenge active, or already cleared — continue.
+      }
+
+      // Brief pause so any post-challenge redirect can complete,
+      // then re-confirm network is idle.
+      await page.waitForTimeout(1500);
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+      const html  = await page.content();
+      const links = [...html.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
+
+      // A real directory listing always has several links.
+      // Fewer than 3 means we likely got challenge/error HTML.
+      if (links.length < 3) {
+        console.warn(`  [browser] only ${links.length} link(s) found — challenge page? retrying...`);
+        continue;
+      }
+
+      console.log(`  [browser] ✓ ${links.length} links found`);
+      return html;
+    } catch (err) {
+      console.warn(`  [browser] attempt ${attempt} error: ${err.message}`);
+      if (attempt === 3) throw err;
+    }
   }
-
-  return page.content();
+  throw new Error(`fetchWithBrowser: all retries exhausted for ${url}`);
 }
 
 /**
@@ -75,15 +106,19 @@ function hrefBasename(href) {
 
   try {
     // ── VirtIO ─────────────────────────────────────────────────────────
+    // We know VIRTIO_MSI is stable, so we only need the archive index —
+    // no per-version directory fetch required.
     console.log('\n=== VirtIO ===');
     const virtioIndexHtml = await fetchWithBrowser(page, VIRTIO_ARCHIVE);
     const virtioLinks = extractLinks(virtioIndexHtml)
-      .filter(h => /^virtio-win-[\d.]+-\d+$/.test(hrefBasename(h)));
+      .filter(h => /^virtio-win-[\d.]+-\d+/.test(hrefBasename(h)));
+
+    console.log(`  Raw folder matches: ${virtioLinks.length}`);
 
     const virtioVersions = virtioLinks
       .map(href => {
         const basename = hrefBasename(href);
-        const m = basename.match(/virtio-win-([\d.]+-\d+)/);
+        const m = basename.match(/^virtio-win-([\d.]+-\d+)/);
         return m ? { basename, version: m[1] } : null;
       })
       .filter(Boolean)
@@ -95,31 +130,23 @@ function hrefBasename(href) {
           if (diff !== 0) return diff;
         }
         return 0;
-      })
-      .slice(0, KEEP_VERSIONS);
+      });
 
-    console.log(`  Found (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
+    console.log(`  Versions found (${virtioVersions.length}):`, virtioVersions.map(v => v.version).join(', '));
 
     for (const v of virtioVersions) {
-      const dirUrl      = `${VIRTIO_ARCHIVE}${v.basename}/`;
-      const dirHtml     = await fetchWithBrowser(page, dirUrl);
-      const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
-
-      if (!fileBasenames.includes(VIRTIO_MSI)) {
-        console.warn(`  ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
-        continue;
-      }
-
-      const msiUrl = `${dirUrl}${VIRTIO_MSI}`;
-      console.log(`  ✓ ${v.version}/${VIRTIO_MSI} → ${msiUrl}`);
+      const msiUrl = `${VIRTIO_ARCHIVE}${v.basename}/${VIRTIO_MSI}`;
       manifest.virtio.push({ version: v.version, file: VIRTIO_MSI, url: msiUrl });
     }
 
     // ── QEMU-GA ────────────────────────────────────────────────────────
+    // Filename changed between old and new versions, so we check each directory.
     console.log('\n=== QEMU Guest Agent ===');
     const qemuIndexHtml = await fetchWithBrowser(page, QEMUGA_ARCHIVE);
     const qemuLinks = extractLinks(qemuIndexHtml)
       .filter(h => /^qemu-ga-win-[\d.]+-\d+/.test(hrefBasename(h)));
+
+    console.log(`  Raw folder matches: ${qemuLinks.length}`);
 
     const qemuVersions = qemuLinks
       .map(href => {
@@ -136,14 +163,13 @@ function hrefBasename(href) {
           if (diff !== 0) return diff;
         }
         return b.release - a.release;
-      })
-      .slice(0, KEEP_VERSIONS);
+      });
 
-    console.log(`  Found (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
+    console.log(`  Versions found (${qemuVersions.length}):`, qemuVersions.map(v => `${v.version}-${v.release}`).join(', '));
 
     for (const v of qemuVersions) {
-      const dirUrl      = `${QEMUGA_ARCHIVE}${v.basename}/`;
-      const dirHtml     = await fetchWithBrowser(page, dirUrl);
+      const dirUrl        = `${QEMUGA_ARCHIVE}${v.basename}/`;
+      const dirHtml       = await fetchWithBrowser(page, dirUrl);
       const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
       let msiFile = null;
@@ -152,13 +178,13 @@ function hrefBasename(href) {
       }
 
       if (!msiFile) {
-        console.warn(`  No matching MSI candidate in ${dirUrl}, skipping.`);
+        console.warn(`  skipping ${v.basename}: no known MSI candidate found`);
         continue;
       }
 
       const msiUrl = `${dirUrl}${msiFile}`;
       const verTag = `${v.version}-${v.release}`;
-      console.log(`  ✓ ${verTag}/${msiFile} → ${msiUrl}`);
+      console.log(`  ✓ ${verTag}/${msiFile}`);
       manifest.qemu_ga.push({ version: verTag, file: msiFile, url: msiUrl });
     }
 
@@ -169,5 +195,5 @@ function hrefBasename(href) {
   // ── Write manifest ────────────────────────────────────────────────────
   const manifestPath = path.resolve('./manifest.json');
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  console.log(`\nmanifest.json written:\n${JSON.stringify(manifest, null, 2)}`);
+  console.log(`\nmanifest.json written — ${manifest.virtio.length} VirtIO, ${manifest.qemu_ga.length} QEMU-GA versions`);
 })();
