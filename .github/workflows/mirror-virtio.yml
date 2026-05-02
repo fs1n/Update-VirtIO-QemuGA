@@ -34,14 +34,14 @@ jobs:
       - name: Restore browser profile cache
         uses: actions/cache@v4
         with:
-          path: ~/.playwright-profile
+          path: /home/runner/.playwright-profile
           key: playwright-profile-v1
 
       # Scrape fedorapeople.org and write manifest.json with direct Fedora download URLs
       - name: Generate manifest
         run: node .github/scripts/mirror-scrape.js
         env:
-          BROWSER_PROFILE_DIR: ~/.playwright-profile
+          BROWSER_PROFILE_DIR: /home/runner/.playwright-profile
 
       # Commit manifest.json to main so the PS1 script can fetch it directly
       - name: Commit manifest to main
