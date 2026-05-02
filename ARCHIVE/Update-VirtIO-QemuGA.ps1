@@ -65,7 +65,7 @@ param(
 
 $ScriptVersion = "1.1.0"
 
-#Regtion Environment Validation
+#Region Environment Validation
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -130,7 +130,7 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
 }
 
 # Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
-# In Previouse verion it was daily based witch to me was enoying.
+# A previous version used a daily log filename, which caused multiple runs on the same day to share one log file.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 

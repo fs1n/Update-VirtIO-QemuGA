@@ -333,10 +333,21 @@ function Install-MsiPackage {
 
 function Read-VersionChoice {
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("VirtIO","QEMU Guest Agent")]
         [string]$ComponentName,
+
+        [Parameter(Mandatory = $true)]
         [array]$Versions
     )
+
+    if (-not $Versions -or $Versions.Count -eq 0) {
+        Write-Log -Message "No available versions found for $ComponentName." -Level "Error"
+        throw "No available versions found for $ComponentName."
+    }
+
     Write-Host "`nAvailable $ComponentName versions:" -ForegroundColor Cyan
+
     for ($i = 0; $i -lt $Versions.Count; $i++) {
         $tag = if ($i -eq 0) { " (latest)" } else { "" }
         Write-Host "  [$($i + 1)] $($Versions[$i].version)$tag"
