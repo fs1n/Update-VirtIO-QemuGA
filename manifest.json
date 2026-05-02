@@ -1,0 +1,21 @@
+{
+  "generated": "2026-05-02T14:50:55.522Z",
+  "virtio": [],
+  "qemu_ga": [
+    {
+      "version": "110.0.2-1",
+      "file": "qemu-ga-x86_64.msi",
+      "url": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-qemu-ga/qemu-ga-win-110.0.2-1.el10/qemu-ga-x86_64.msi"
+    },
+    {
+      "version": "109.1.0-7",
+      "file": "qemu-ga-x86_64.msi",
+      "url": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-qemu-ga/qemu-ga-win-109.1.0-7.el10/qemu-ga-x86_64.msi"
+    },
+    {
+      "version": "108.0.2-1",
+      "file": "qemu-ga-x86_64.msi",
+      "url": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-qemu-ga/qemu-ga-win-108.0.2-1.el9/qemu-ga-x86_64.msi"
+    }
+  ]
+}
