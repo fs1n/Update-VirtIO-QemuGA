@@ -1,24 +1,27 @@
 <#
 .SYNOPSIS
-    Updates VirtIO Windows drivers and QEMU Guest Agent from Fedora People Archive.
+    Updates VirtIO Windows drivers and QEMU Guest Agent from the project's release manifest.
 .DESCRIPTION
-    This script runs on Windows and automates the update process for VirtIO components sourced from the Fedora People Archive root URL.
-    It performs environment validation (OS and administrator rights), checks currently installed versions, resolves the latest available
-    archive version, downloads the MSI package to a temporary working directory, installs it silently, writes structured logs, and
-    optionally cleans up downloaded installer files.
+    This script runs on Windows and automates the update process for the VirtIO drivers and the QEMU Guest Agent.
+    It performs environment validation (OS and administrator rights), checks currently installed versions, resolves
+    the desired version from a release manifest (manifest.json in this repository), downloads the MSI package to a
+    temporary working directory, installs it silently, writes structured logs, and optionally cleans up downloaded
+    installer files.
 
     The script is designed to be PowerShell 5.1 and PowerShell 7 compatible.
     Use -Force, -AutoCleanup, and -AutoReboot for non-interactive / automated execution.
     Use -InstallVioSCSI to automatically install the vioscsi dummy device (e.g. from an RMM tool).
 
 .PARAMETER Force
-    Skips the initial confirmation prompt and runs non-interactively.
+    Skips ALL interactive prompts and runs non-interactively. Use this for fully automated / RMM-driven runs.
 
 .PARAMETER AutoCleanup
     Automatically deletes downloaded MSI files after installation without prompting.
+    Implicitly enabled when -Force is used.
 
 .PARAMETER AutoReboot
     Automatically reboots the system after installation if required (ExitCode 3010), without prompting.
+    Implicitly enabled when -Force is used.
 
 .PARAMETER InstallVioSCSI
     Automatically installs the vioscsi dummy device without prompting.
@@ -26,14 +29,18 @@
     Has no effect if a vioscsi device is already present.
 
 .PARAMETER VirtIOVersion
-    Specify a particular VirtIO version to install (e.g. "0.1.285"). Default is "latest" which selects the newest available version from the manifest.
+    Specify a particular VirtIO version to install (e.g. "0.1.285-1"). The value must match a manifest entry
+    exactly (the Windows installer reports the core version, e.g. "0.1.285", while the manifest typically
+    includes the package release suffix, e.g. "0.1.285-1"). Use "latest" (the default) to select the newest
+    available version from the manifest.
 
 .PARAMETER QemuGAVersion
-    Specify a particular QEMU Guest Agent version to install (e.g. "0.1.285"). Default is "latest" which selects the newest available version from the manifest.
+    Specify a particular QEMU Guest Agent version to install (e.g. "110.0.2-1"). The value must match a
+    manifest entry exactly. Use "latest" (the default) to select the newest available version from the manifest.
 
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1
-    Runs the script interactively, downloads the latest VirtIO MSI, installs it, and prompts for cleanup.
+    Runs the script interactively, downloads the latest VirtIO and QEMU-GA MSIs, installs them, and prompts for cleanup.
 
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot
@@ -42,6 +49,10 @@
 .EXAMPLE
     .\Update-VirtIO-QemuGA.ps1 -Force -AutoCleanup -AutoReboot -InstallVioSCSI
     Fully automated run including vioscsi dummy device installation.
+
+.EXAMPLE
+    .\Update-VirtIO-QemuGA.ps1 -VirtIOVersion "0.1.285-1" -QemuGAVersion "110.0.2-1"
+    Pins both components to specific manifest versions. No prompts.
 
 .EXAMPLE
     powershell.exe -ExecutionPolicy Bypass -File .\Update-VirtIO-QemuGA.ps1 -Force
@@ -55,10 +66,17 @@
 
 .NOTES
     ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 2.0.0
+    Version           : 2.1.0
     Author            : Frederik S. (fs1n)
     License           : MIT License
     GitHub            : fs1n/Update-VirtIO-QemuGA
+    Changelog
+      2.1.0  Internal cleanup: extracted Resolve-AndInstallComponent helper to remove
+              duplication between the VirtIO and QEMU-GA flows, hardened error handling
+              (throw in helpers, exit 1 at top level), fixed docstring examples and typos,
+              added [CmdletBinding()] to Read-VersionChoice, added parameter validation,
+              and ensured -Force suppresses every interactive prompt.
+      2.0.0  Manifest-driven update flow for both VirtIO and QEMU Guest Agent.
 #>
 
 [CmdletBinding()]
@@ -67,13 +85,16 @@ param(
     [switch]$AutoCleanup,
     [switch]$AutoReboot,
     [switch]$InstallVioSCSI,
+    [ValidatePattern('^(latest|\d+(?:\.\d+){1,3}(?:-\d+)?)$')]
     [string]$VirtIOVersion  = "latest",
+    [ValidatePattern('^(latest|\d+(?:\.\d+){1,3}(?:-\d+)?)$')]
     [string]$QemuGAVersion  = "latest"
 )
 
-$ScriptVersion = "2.0.0"
+# Single source of truth for the script's own version. Mirrors the .NOTES block above.
+$ScriptVersion = "2.1.0"
 
-#Regtion Environment Validation
+#Region Environment Validation
 
 if ($env:OS -ne "Windows_NT") {
     Write-Host "This script is only intended to run on Windows systems!" -ForegroundColor Red
@@ -114,11 +135,6 @@ $UninstallRegistryPaths = @(
 
 $VirtIODisplayNamePattern  = "*virtio*installer*"
 $QemuGADisplayNamePattern  = "*QEMU Guest Agent*"
-$VirtIOmsiFileName         = "virtio-win-gt-x64.msi"
-$QemuGAmsiCandidates       = @(
-    "qemu-ga-x86_64.msi",
-    "qemu-ga-x64.msi"
-)
 
 $QemuGAExecutablePaths = @(
     'C:\Program Files\Qemu-ga\qemu-ga.exe',
@@ -132,8 +148,8 @@ if (-not (Test-Path -Path $ScriptTempPath)) {
     New-Item -Path $ScriptTempPath -ItemType Directory | Out-Null
 }
 
-# Unique log file per run (timestamp in filename prevents log mixing across multiple daily runs)
-# In Previouse verion it was daily based witch to me was enoying.
+# Unique log file per run: the timestamp in the filename keeps multiple daily runs from
+# sharing a log file, which previously made correlating entries from a single run awkward.
 $script:LogFilePath    = Join-Path -Path $ScriptTempPath -ChildPath "log_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
 $script:RebootRequired = $false
 
@@ -185,7 +201,34 @@ function Write-Log {
     }
 }
 
-Function Read-YesNoChoice {
+# Build a consistent, loggable error context record from a catch block.
+# Returns a PSCustomObject so callers can re-throw with full context preserved.
+function Get-ErrorContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Caller,
+
+        [Parameter(Mandatory = $false)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord = $null
+    )
+
+    if ($null -eq $ErrorRecord) { $ErrorRecord = $_ }
+
+    $message = if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $ErrorRecord.Exception.Message
+    } else {
+        "$ErrorRecord"
+    }
+
+    $full = "[$Caller] $message"
+    if ($ErrorRecord -and $ErrorRecord.ScriptStackTrace) {
+        $full += "`n$($ErrorRecord.ScriptStackTrace)"
+    }
+    return $full
+}
+
+function Read-YesNoChoice {
     [CmdletBinding()]
     Param (
         [Parameter(Mandatory=$false)][String]$Title = "",
@@ -199,6 +242,8 @@ Function Read-YesNoChoice {
 }
 
 function Test-PendingReboot {
+    [CmdletBinding()]
+    param()
 # Based on https://stackoverflow.com/questions/47867949/how-can-i-check-for-a-pending-reboot
     $pending = $false
     $checks = @(
@@ -228,7 +273,7 @@ function Test-PendingReboot {
     return $pending
 }
 
-function Get-VirtIOComparableVersion {
+function Get-ComparableVersion {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -250,12 +295,20 @@ function Install-MsiPackage {
     <#
     .SYNOPSIS
         Downloads, installs, and optionally cleans up an MSI package.
+    .DESCRIPTION
+        Pulls the MSI from the manifest URL into the script's temp directory, runs msiexec in quiet mode,
+        records a reboot-required flag on ExitCode 3010, and finally cleans up the downloaded file
+        according to -AutoCleanup (or -Force, which implies it).
     .PARAMETER DisplayName
         Human-readable name used in log messages (e.g. "VirtIO" or "QEMU Guest Agent").
     .PARAMETER MsiFileName
-        Filename of the MSI (e.g. "virtio-win-gt-x64.msi").
+        Filename to save the MSI as on disk. The actual value is taken from the manifest entry's "file"
+        field, so this parameter should normally be passed straight through from there.
     .PARAMETER DownloadURL
-        Full URL to download the MSI from.
+        Full URL to download the MSI from. Taken from the manifest entry's "url" field.
+    .OUTPUTS
+        None. Throws on any unrecoverable download or install failure so the caller can decide how
+        to react (top-level script exits with a non-zero status).
     #>
     [CmdletBinding()]
     param(
@@ -279,8 +332,9 @@ function Install-MsiPackage {
         Write-Log -Message "Successfully downloaded $MsiFileName" -Level "Info"
     }
     catch {
-        Write-Log -Message "Failed to download $MsiFileName. Error: $_" -Level "Error"
-        exit 1
+        $ctx = Get-ErrorContext -Caller "Install-MsiPackage (download $DisplayName)"
+        Write-Log -Message "Failed to download $MsiFileName. $ctx" -Level "Error"
+        throw
     }
 
     # --- Install ---
@@ -296,7 +350,7 @@ function Install-MsiPackage {
         }
         else {
             Write-Log -Message "Installation of $MsiFileName failed with exit code $($installProcess.ExitCode)" -Level "Error"
-            exit 1
+            throw "msiexec exited with code $($installProcess.ExitCode) for $MsiFileName"
         }
 
         if (Test-PendingReboot) {
@@ -305,12 +359,14 @@ function Install-MsiPackage {
         }
     }
     catch {
-        Write-Log -Message "Failed to install $MsiFileName. Error: $_" -Level "Error"
-        exit 1
+        $ctx = Get-ErrorContext -Caller "Install-MsiPackage (install $DisplayName)"
+        Write-Log -Message "Failed to install $MsiFileName. $ctx" -Level "Error"
+        throw
     }
 
     # --- Cleanup ---
-    $doCleanup = $AutoCleanup
+    # -Force implies -AutoCleanup so non-interactive runs never leave installers behind.
+    $doCleanup = $AutoCleanup -or $Force
     if (-not $doCleanup) {
         $cleanupAnswer = Read-YesNoChoice -Message "Should the downloaded MSI file be deleted?" -DefaultOption 1
         $doCleanup = $cleanupAnswer -match 1
@@ -322,7 +378,8 @@ function Install-MsiPackage {
             Write-Log -Message "Deleted downloaded MSI file: $localPath" -Level "Info"
         }
         catch {
-            Write-Log -Message "Failed to delete downloaded MSI file: $localPath. Error: $_" -Level "Warning"
+            $ctx = Get-ErrorContext -Caller "Install-MsiPackage (cleanup $DisplayName)"
+            Write-Log -Message "Failed to delete downloaded MSI file: $localPath. $ctx" -Level "Warning"
         }
     }
     else {
@@ -331,6 +388,7 @@ function Install-MsiPackage {
 }
 
 function Read-VersionChoice {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [ValidateSet("VirtIO","QEMU Guest Agent")]
@@ -357,229 +415,270 @@ function Read-VersionChoice {
     return $Versions[[int]$choice - 1]
 }
 
+function Resolve-AndInstallComponent {
+    <#
+    .SYNOPSIS
+        Resolves a version from the manifest for one component (VirtIO or QEMU-GA), compares it
+        against the locally installed version, and triggers the install if an upgrade is needed.
+    .DESCRIPTION
+        This is the single source of truth for the "pick a version -> compare -> install" flow
+        that used to be duplicated for VirtIO and QEMU Guest Agent. Both components share the
+        exact same logic, differing only in their display name, manifest key, requested version
+        and currently installed version. Non-interactive callers (those passing -Force) skip the
+        "install latest?" prompt and go straight to installation.
+    .PARAMETER ComponentName
+        Human-readable name used in log/console messages (e.g. "VirtIO" or "QEMU Guest Agent").
+    .PARAMETER ManifestKey
+        Property name on the manifest object (e.g. "virtio" or "qemu_ga").
+    .PARAMETER RequestedVersion
+        Value from the corresponding -VirtIOVersion / -QemuGAVersion script parameter. Either
+        "latest" (or empty) to pick the newest entry, or an exact manifest version string.
+    .PARAMETER InstalledVersion
+        The version currently installed on the local system, or $null / empty if the component
+        is not installed. Used to skip the install when already up-to-date.
+    .OUTPUTS
+        None. Throws if the manifest key is missing, the requested version is unknown, or the
+        install itself fails.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("VirtIO", "QEMU Guest Agent")]
+        [string]$ComponentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestKey,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RequestedVersion = "latest",
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$InstalledVersion = $null
+    )
+
+    $availableVersions = $manifest.$ManifestKey
+    if (-not $availableVersions -or $availableVersions.Count -eq 0) {
+        throw "Manifest has no entries under '$ManifestKey' for $ComponentName."
+    }
+
+    # --- Version selection ---
+    $useLatest = [string]::IsNullOrWhiteSpace($RequestedVersion) -or $RequestedVersion -eq "latest"
+    if ($useLatest) {
+        $selected = $availableVersions[0]
+        if (-not $Force) {
+            Write-Host "`nLatest available $ComponentName`: $($selected.version)" -ForegroundColor Cyan
+            $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
+            if ($ans -notmatch 1) {
+                $selected = Read-VersionChoice -ComponentName $ComponentName -Versions $availableVersions
+            }
+        }
+    }
+    else {
+        $selected = $availableVersions | Where-Object { $_.version -eq $RequestedVersion } | Select-Object -First 1
+        if (-not $selected) {
+            $availableList = ($availableVersions | ForEach-Object { $_.version }) -join ', '
+            throw "$ComponentName version '$RequestedVersion' not found in manifest. Available: $availableList"
+        }
+    }
+    Write-Log -Message "Selected $ComponentName version: $($selected.version)" -Level "Info"
+
+    # --- Version comparison (skip if already up-to-date) ---
+    if (-not [string]::IsNullOrWhiteSpace($InstalledVersion)) {
+        $installedComparable = Get-ComparableVersion -VersionString $InstalledVersion
+        $availableComparable = Get-ComparableVersion -VersionString $selected.version
+        if ($null -ne $installedComparable -and $null -ne $availableComparable -and $installedComparable -ge $availableComparable) {
+            Write-Log -Message "$ComponentName is already up-to-date (installed: $InstalledVersion). Skipping." -Level "Info"
+            return
+        }
+    }
+
+    # --- Install ---
+    Install-MsiPackage -DisplayName $ComponentName -MsiFileName $selected.file -DownloadURL $selected.url
+}
+
 #EndRegion
 
 #Region Script
 
-Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v$ScriptVersion started ===" -Level "Info"
+# Top-level entrypoint. We wrap the entire main flow in a try/catch so any exception raised
+# by a helper (which now uses `throw` instead of `exit 1`) is logged exactly once and the
+# script exits with a non-zero status. This keeps the process exit decision in one place.
+function Invoke-Main {
+    [CmdletBinding()]
+    param()
 
-if (-not $Force) {
-    $confirm = Read-YesNoChoice -Message "Should the VirtIO drivers and the QEMU Guest Agent be updated?" -DefaultOption 0
-    if ($confirm -notmatch 1) {
-        Write-Host "Script canceled." -ForegroundColor Yellow
-        exit 0
+    Write-Log -Message "=== Update-VirtIO-QemuGA.ps1 v$ScriptVersion started ===" -Level "Info"
+
+    if (-not $Force) {
+        $confirm = Read-YesNoChoice -Message "Should the VirtIO drivers and the QEMU Guest Agent be updated?" -DefaultOption 0
+        if ($confirm -notmatch 1) {
+            Write-Host "Script canceled." -ForegroundColor Yellow
+            return
+        }
     }
-}
 
-$SkipVirtIO = $false
-$SkipQemuGA = $false
+    # --- Detect installed VirtIO version (Registry) ---
+    $VirtIOCurrentVersion = $null
+    try {
+        $VirtIOCurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.DisplayName -like $VirtIODisplayNamePattern } |
+            Select-Object -ExpandProperty DisplayVersion -First 1
 
-# --- Detect installed VirtIO version (Registry) ---
-try {
-    $VirtIOCurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -and $_.DisplayName -like $VirtIODisplayNamePattern } |
-        Select-Object -ExpandProperty DisplayVersion -First 1
-
-    if ([string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
-        Write-Log -Message "VirtIO not installed (no matching registry entry found)." -Level "Warning"
+        if ([string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
+            Write-Log -Message "VirtIO not installed (no matching registry entry found)." -Level "Warning"
+        }
+        else {
+            Write-Log -Message "Detected VirtIO version: $VirtIOCurrentVersion" -Level "Info"
+        }
     }
-    else {
-        Write-Log -Message "Detected VirtIO version: $VirtIOCurrentVersion" -Level "Info"
+    catch {
+        $ctx = Get-ErrorContext -Caller "VirtIO version detection"
+        Write-Log -Message "Unable to retrieve VirtIO version. $ctx" -Level "Warning"
     }
-}
-catch {
-    Write-Log -Message "Unable to retrieve VirtIO version: $_" -Level "Warning"
-}
 
-# --- Detect installed QEMU Guest Agent version (Registry preferred, executable fallback) ---
-try {
+    # --- Detect installed QEMU Guest Agent version (Registry preferred, executable fallback) ---
     $QemuGACurrentVersion = $null
+    try {
+        # Primary: Registry lookup (consistent with VirtIO detection)
+        $QemuGACurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.DisplayName -like $QemuGADisplayNamePattern } |
+            Select-Object -ExpandProperty DisplayVersion -First 1
 
-    # Primary: Registry lookup (consistent with VirtIO detection)
-    $QemuGACurrentVersion = Get-ItemProperty -Path $UninstallRegistryPaths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -and $_.DisplayName -like $QemuGADisplayNamePattern } |
-        Select-Object -ExpandProperty DisplayVersion -First 1
-
-    # Fallback: executable file version
-    if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-        foreach ($path in $QemuGAExecutablePaths) {
-            if (Test-Path -Path $path) {
-                $QemuGACurrentVersion = (Get-Item -Path $path -ErrorAction Stop).VersionInfo.FileVersion
-                Write-Log -Message "QEMU Guest Agent version resolved via executable fallback." -Level "Info"
-                break
+        # Fallback: executable file version
+        if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
+            foreach ($path in $QemuGAExecutablePaths) {
+                if (Test-Path -Path $path) {
+                    $QemuGACurrentVersion = (Get-Item -Path $path -ErrorAction Stop).VersionInfo.FileVersion
+                    Write-Log -Message "QEMU Guest Agent version resolved via executable fallback." -Level "Info"
+                    break
+                }
             }
         }
+
+        if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
+            Write-Log -Message "QEMU Guest Agent not installed (no registry entry or executable found)." -Level "Warning"
+        }
+        else {
+            Write-Log -Message "Detected QEMU Guest Agent version: $QemuGACurrentVersion" -Level "Info"
+        }
+    }
+    catch {
+        $ctx = Get-ErrorContext -Caller "QEMU-GA version detection"
+        Write-Log -Message "Unable to retrieve QEMU Guest Agent version. $ctx" -Level "Warning"
     }
 
-    if ([string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-        Write-Log -Message "QEMU Guest Agent not installed (no registry entry or executable found)." -Level "Warning"
+    # --- Fetch release manifest ---
+    Write-Log -Message "Fetching release manifest from: $ManifestURL" -Level "Info"
+    $manifest = $null
+    try {
+        $manifestJson = Invoke-WebRequest -Uri $ManifestURL -UseBasicParsing -ErrorAction Stop
+        $manifest     = $manifestJson.Content | ConvertFrom-Json
+    }
+    catch {
+        $ctx = Get-ErrorContext -Caller "Manifest fetch"
+        Write-Log -Message "Failed to fetch release manifest. $ctx" -Level "Error"
+        throw
+    }
+
+    # --- Resolve + install each component through the shared helper ---
+    Resolve-AndInstallComponent -ComponentName "VirtIO"           -ManifestKey "virtio"   -RequestedVersion $VirtIOVersion -InstalledVersion $VirtIOCurrentVersion
+    Resolve-AndInstallComponent -ComponentName "QEMU Guest Agent" -ManifestKey "qemu_ga"  -RequestedVersion $QemuGAVersion -InstalledVersion $QemuGACurrentVersion
+
+    # --- Reboot handling ---
+    if ($script:RebootRequired) {
+        Write-Log -Message "At least one installation requires a system reboot." -Level "Warning"
+
+        # -Force implies -AutoReboot so non-interactive runs honour the pending reboot.
+        $doReboot = $AutoReboot -or $Force
+        if (-not $doReboot) {
+            $restartAnswer = Read-YesNoChoice -Message "A reboot is required to finalize installation. Restart now? (y/N)" -DefaultOption 0
+            $doReboot = $restartAnswer -match 1
+        }
+
+        if ($doReboot) {
+            Write-Log -Message "Initiating system reboot." -Level "Warning"
+            try {
+                Restart-Computer -Force
+            }
+            catch {
+                $ctx = Get-ErrorContext -Caller "Restart-Computer"
+                Write-Log -Message "Failed to trigger system reboot. $ctx" -Level "Error"
+                throw
+            }
+        }
+        else {
+            Write-Log -Message "Reboot postponed. Please reboot later to complete installation." -Level "Warning"
+        }
+    }
+
+    # --- vioscsi dummy device check (Proxmox VE migration preparation) ---
+    if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
+        $doInstallVioSCSI = $InstallVioSCSI.IsPresent
+        if (-not $Force -and -not $doInstallVioSCSI) {
+            Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
+            Write-Host "To install the dummy vioscsi device, an external script will be downloaded and executed from GitHub. The script is open source and available at:" -ForegroundColor Red
+            Write-Host "https://github.com/croit/load-virtio-scsi-on-boot" -ForegroundColor Red
+            $confirmVioSCSI   = Read-YesNoChoice -Message "Do you want to install a dummy vioscsi device now? (y/N)" -DefaultOption 0
+            $doInstallVioSCSI = $confirmVioSCSI -match 1
+        }
+
+        if ($doInstallVioSCSI) {
+            # Credit: vioscsi dummy device installer by croit
+            # https://github.com/croit/load-virtio-scsi-on-boot (MIT License)
+            $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
+            $dummyScriptPath   = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
+
+            Write-Log -Message "Downloading vioscsi dummy installer to: $dummyScriptPath" -Level "Info"
+
+            try {
+                Invoke-WebRequest -Uri $dummyInstallerURL -OutFile $dummyScriptPath -UseBasicParsing -ErrorAction Stop
+                Write-Log -Message "Successfully downloaded vioscsi dummy installer." -Level "Info"
+            }
+            catch {
+                $ctx = Get-ErrorContext -Caller "vioscsi installer download"
+                Write-Log -Message "Failed to download vioscsi dummy installer. $ctx" -Level "Error"
+                throw
+            }
+
+            Write-Log -Message "Executing vioscsi dummy installer." -Level "Info"
+            try {
+                $shell = if ($PSVersionTable.PSVersion.Major -ge 6) { "pwsh.exe" } else { "powershell.exe" }
+                & $shell -ExecutionPolicy Bypass -File $dummyScriptPath
+
+                # Clean up downloaded script after successful execution
+                Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue
+                Write-Log -Message "Deleted vioscsi dummy installer Script: $dummyScriptPath" -Level "Info"
+            }
+            catch {
+                $ctx = Get-ErrorContext -Caller "vioscsi installer execute"
+                Write-Log -Message "Failed to execute vioscsi dummy installer. $ctx" -Level "Error"
+                throw
+            }
+        }
+        else {
+            Write-Log -Message "vioscsi device not found. Skipping dummy device installation." -Level "Info"
+        }
     }
     else {
-        Write-Log -Message "Detected QEMU Guest Agent version: $QemuGACurrentVersion" -Level "Info"
+        Write-Host "vioscsi device found. No need to install a dummy vioscsi device." -ForegroundColor Green
     }
-}
-catch {
-    Write-Log -Message "Unable to retrieve QEMU Guest Agent version: $_" -Level "Warning"
+
+    Write-Log -Message "=== Script completed ===" -Level "Info"
 }
 
-# --- Fetch release manifest ---
-Write-Log -Message "Fetching release manifest from: $ManifestURL" -Level "Info"
+# Run main, then decide the exit code in exactly one place.
 try {
-    $manifestJson = Invoke-WebRequest -Uri $ManifestURL -UseBasicParsing -ErrorAction Stop
-    $manifest = $manifestJson.Content | ConvertFrom-Json
+    Invoke-Main
+    exit 0
 }
 catch {
-    Write-Log -Message "Failed to fetch release manifest. Error: $_" -Level "Error"
+    # Anything that escaped from a helper ends up here. Log the full context and bail.
+    $ctx = Get-ErrorContext -Caller "Top-level"
+    Write-Log -Message "Script aborted. $ctx" -Level "Error"
     exit 1
 }
-
-# --- Resolve VirtIO version ---
-if ($VirtIOVersion -eq "latest") {
-    $selectedVirtIO = $manifest.virtio[0]
-    if (-not $Force) {
-        Write-Host "`nLatest available VirtIO: $($selectedVirtIO.version)" -ForegroundColor Cyan
-        $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
-        if ($ans -notmatch 1) {
-            $selectedVirtIO = Read-VersionChoice -ComponentName "VirtIO" -Versions $manifest.virtio
-        }
-    }
-}
-else {
-    $selectedVirtIO = $manifest.virtio | Where-Object { $_.version -eq $VirtIOVersion } | Select-Object -First 1
-    if (-not $selectedVirtIO) {
-        Write-Log -Message "VirtIO version '$VirtIOVersion' not found in mirror release. Available: $(($manifest.virtio | ForEach-Object { $_.version }) -join ', ')" -Level "Error"
-        exit 1
-    }
-}
-Write-Log -Message "Selected VirtIO version: $($selectedVirtIO.version)" -Level "Info"
-
-# --- Resolve QEMU-GA version ---
-if ($QemuGAVersion -eq "latest") {
-    $selectedQemuGA = $manifest.qemu_ga[0]
-    if (-not $Force) {
-        Write-Host "`nLatest available QEMU Guest Agent: $($selectedQemuGA.version)" -ForegroundColor Cyan
-        $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
-        if ($ans -notmatch 1) {
-            $selectedQemuGA = Read-VersionChoice -ComponentName "QEMU Guest Agent" -Versions $manifest.qemu_ga
-        }
-    }
-}
-else {
-    $selectedQemuGA = $manifest.qemu_ga | Where-Object { $_.version -eq $QemuGAVersion } | Select-Object -First 1
-    if (-not $selectedQemuGA) {
-        Write-Log -Message "QEMU-GA version '$QemuGAVersion' not found in mirror release. Available: $(($manifest.qemu_ga | ForEach-Object { $_.version }) -join ', ')" -Level "Error"
-        exit 1
-    }
-}
-Write-Log -Message "Selected QEMU-GA version: $($selectedQemuGA.version)" -Level "Info"
-
-# --- VirtIO: version comparison + install ---
-if (-not [string]::IsNullOrWhiteSpace($VirtIOCurrentVersion)) {
-    $installedVer = Get-VirtIOComparableVersion -VersionString $VirtIOCurrentVersion
-    $availableVer = Get-VirtIOComparableVersion -VersionString $selectedVirtIO.version
-    if ($null -ne $installedVer -and $null -ne $availableVer -and $installedVer -ge $availableVer) {
-        Write-Log -Message "VirtIO is already up-to-date (installed: $VirtIOCurrentVersion). Skipping." -Level "Info"
-        $SkipVirtIO = $true
-    }
-}
-
-if (-not $SkipVirtIO) {
-    Install-MsiPackage -DisplayName "VirtIO" -MsiFileName $selectedVirtIO.file -DownloadURL $selectedVirtIO.url
-}
-
-# --- QEMU-GA: version comparison + install ---
-if (-not [string]::IsNullOrWhiteSpace($QemuGACurrentVersion)) {
-    $installedVer = Get-VirtIOComparableVersion -VersionString $QemuGACurrentVersion
-    $availableVer = Get-VirtIOComparableVersion -VersionString $selectedQemuGA.version
-    if ($null -ne $installedVer -and $null -ne $availableVer -and $installedVer -ge $availableVer) {
-        Write-Log -Message "QEMU Guest Agent is already up-to-date (installed: $QemuGACurrentVersion). Skipping." -Level "Info"
-        $SkipQemuGA = $true
-    }
-}
-
-if (-not $SkipQemuGA) {
-    Install-MsiPackage -DisplayName "QEMU Guest Agent" -MsiFileName $selectedQemuGA.file -DownloadURL $selectedQemuGA.url
-}
-
-
-
-# --- Reboot handling ---
-if ($script:RebootRequired) {
-
-    Write-Log -Message "At least one installation requires a system reboot." -Level "Warning"
-
-    $doReboot = $AutoReboot
-    if (-not $doReboot) {
-        $restartAnswer = Read-YesNoChoice -Message "A reboot is required to finalize installation. Restart now? (y/N)" -DefaultOption 0
-        $doReboot = $restartAnswer -match 1
-    }
-
-    if ($doReboot) {
-        Write-Log -Message "Initiating system reboot." -Level "Warning"
-        try {
-            Restart-Computer -Force
-        }
-        catch {
-            Write-Log -Message "Failed to trigger system reboot. Error: $_" -Level "Error"
-            exit 1
-        }
-    }
-    else {
-        Write-Log -Message "Reboot postponed. Please reboot later to complete installation." -Level "Warning"
-    }
-}
-
-# --- vioscsi dummy device check (Proxmox VE migration preparation) ---
-if (-not (Get-PnpDevice | Where-Object { $_.Service -eq "vioscsi" })) {
-    # Determine whether to install: honour -InstallVioSCSI switch, otherwise prompt (unless -Force suppresses all prompts)
-    $doInstallVioSCSI = $InstallVioSCSI.IsPresent
-    if (-not $Force -and -not $doInstallVioSCSI) {
-        Write-Host "No vioscsi device found. If you want to migrate to Proxmox VE you need to pre-install a dummy vioscsi device to make migration seamless." -ForegroundColor Yellow
-        Write-Host "To install the dummy vioscsi device, an external script will be downloaded and executed from GitHub. The script is open source and available at:" -ForegroundColor Red
-        Write-Host "https://github.com/croit/load-virtio-scsi-on-boot" -ForegroundColor Red
-        $confirmVioSCSI   = Read-YesNoChoice -Message "Do you want to install a dummy vioscsi device now? (y/N)" -DefaultOption 0
-        $doInstallVioSCSI = $confirmVioSCSI -match 1
-    }
-
-    if ($doInstallVioSCSI) {
-        # Credit: vioscsi dummy device installer by croit
-        # https://github.com/croit/load-virtio-scsi-on-boot (MIT License)
-        $dummyInstallerURL = "https://raw.githubusercontent.com/croit/load-virtio-scsi-on-boot/refs/heads/main/enable-vioscsi-to-load-on-boot.ps1"
-        $dummyScriptPath   = Join-Path -Path $ScriptTempPath -ChildPath "enable-vioscsi-to-load-on-boot.ps1"
-
-        Write-Log -Message "Downloading vioscsi dummy installer to: $dummyScriptPath" -Level "Info"
-        
-        try {
-            Invoke-WebRequest -Uri $dummyInstallerURL -OutFile $dummyScriptPath -UseBasicParsing -ErrorAction Stop
-            Write-Log -Message "Successfully downloaded vioscsi dummy installer." -Level "Info"
-        }
-        catch {
-            Write-Log -Message "Failed to download vioscsi dummy installer. Error: $_" -Level "Error"
-            exit 1
-        }
-
-        Write-Log -Message "Executing vioscsi dummy installer." -Level "Info"
-        try {
-            $shell = if ($PSVersionTable.PSVersion.Major -ge 6) { "pwsh.exe" } else { "powershell.exe" }
-            & $shell -ExecutionPolicy Bypass -File $dummyScriptPath
-            
-            # Clean up downloaded script after successful execution
-            Remove-Item -Path $dummyScriptPath -Force -ErrorAction SilentlyContinue
-            Write-Log -Message "Deleted vioscsi dummy installer Script: $dummyScriptPath" -Level "Info"
-        }
-        catch {
-            Write-Log -Message "Failed to execute vioscsi dummy installer. Error: $_" -Level "Error"
-            exit 1
-        }
-    }
-    else {
-        Write-Log -Message "vioscsi device not found. Skipping dummy device installation." -Level "Info"
-    }
-}
-else {
-    Write-Host "vioscsi device found. No need to install a dummy vioscsi device." -ForegroundColor Green
-}
-
-Write-Log -Message "=== Script completed ===" -Level "Info"
 
 #EndRegion

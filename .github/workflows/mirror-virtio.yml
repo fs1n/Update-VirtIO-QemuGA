@@ -2,8 +2,15 @@ name: Mirror VirtIO & QEMU-GA from Fedora Archive
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 3 * * 0'   # Sundays at 03:00 UTC
   workflow_dispatch:
+
+# Prevent overlapping runs of this workflow from racing on the same
+# manifest commit. cancel-in-progress: false so a Sunday run that started
+# late is not killed by a manually-dispatched run that finishes first.
+concurrency:
+  group: mirror-virtio
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -37,29 +44,47 @@ jobs:
           path: /home/runner/.playwright-profile
           key: playwright-profile-v1
 
-      # Scrape fedorapeople.org and write manifest.json with direct Fedora download URLs
+      # Scrape fedorapeople.org and merge into manifest.json with direct Fedora download URLs
       - name: Generate manifest
         run: node .github/scripts/mirror-scrape.js
         env:
           BROWSER_PROFILE_DIR: /home/runner/.playwright-profile
 
-      # Commit manifest.json to main so the PS1 script can fetch it directly
+      # Commit manifest.json to main so the PS1 script can fetch it directly.
+      # The scraper already preserves old entries on merge, but we still guard
+      # here against: (a) the scraper crashing before writing anything, and
+      # (b) a corrupt/empty manifest being committed.
       - name: Commit manifest to main
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add manifest.json
-          git diff --staged --quiet || git commit -m "chore: update manifest.json [skip ci]"
-          git push
+          if [ -f manifest.json ] && jq -e '.virtio | length > 0 and .qemu_ga | length > 0' manifest.json > /dev/null; then
+            git add manifest.json
+            git diff --staged --quiet || git commit -m "chore: update manifest.json [skip ci]"
+            git push
+          else
+            echo "::warning::manifest.json missing or empty — manifest not updated"
+          fi
 
       - name: Write job summary
         if: always()
         run: |
-          echo "## Mirror Run $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-          if [ -f manifest.json ]; then
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat manifest.json >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "manifest.json not found — scraping may have failed" >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "## Mirror run — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            if [ -f manifest.json ] && jq -e '.virtio | length > 0 and .qemu_ga | length > 0' manifest.json > /dev/null; then
+              echo "- **Generated:** $(jq -r '.generated' manifest.json)"
+              echo "- **VirtIO versions:** $(jq '.virtio | length' manifest.json)"
+              echo "- **QEMU-GA versions:** $(jq '.qemu_ga | length' manifest.json)"
+              echo ""
+              echo "<details><summary>Full manifest.json</summary>"
+              echo ""
+              echo '```json'
+              cat manifest.json
+              echo '```'
+              echo ""
+              echo "</details>"
+            else
+              echo "::warning::manifest.json missing or empty — nothing to commit."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
