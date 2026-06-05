@@ -65,18 +65,25 @@
     None. The script writes status information to console and log file.
 
 .NOTES
-    ScriptName        : Update-VirtIO-QemuGA.ps1
-    Version           : 2.1.0
-    Author            : Frederik S. (fs1n)
-    License           : MIT License
-    GitHub            : fs1n/Update-VirtIO-QemuGA
+    ScriptName  : Update-VirtIO-QemuGA.ps1
+    Version     : 2.1.1
+    Author      : Frederik S. (fs1n)
+    License     : MIT License
+    GitHub      : fs1n/Update-VirtIO-QemuGA
     Changelog
-      2.1.0  Internal cleanup: extracted Resolve-AndInstallComponent helper to remove
-              duplication between the VirtIO and QEMU-GA flows, hardened error handling
-              (throw in helpers, exit 1 at top level), fixed docstring examples and typos,
-              added [CmdletBinding()] to Read-VersionChoice, added parameter validation,
-              and ensured -Force suppresses every interactive prompt.
-      2.0.0  Manifest-driven update flow for both VirtIO and QEMU Guest Agent.
+      2.1.1  UX fix: "install latest?" prompt no longer fires when the latest
+              available version is already installed — the up-to-date check
+              now runs first, so the script logs and skips. The check also
+              re-runs when a user picks an already-installed version from
+              the version list, and the skip log line now shows both the
+              installed and the manifest version for clarity.
+      2.1.0  Internal cleanup: extracted Resolve-AndInstallComponent helper
+              to dedupe the VirtIO and QEMU-GA flows, hardened error
+              handling, added parameter validation, ensured -Force implies
+              -AutoCleanup and -AutoReboot, fixed docstring examples and
+              typos.
+      2.0.0  Manifest-driven update flow for both VirtIO and QEMU Guest
+              Agent (overcomes the Anubis bot protection on fedorapeople.org).
 #>
 
 [CmdletBinding()]
@@ -92,7 +99,7 @@ param(
 )
 
 # Single source of truth for the script's own version. Mirrors the .NOTES block above.
-$ScriptVersion = "2.1.0"
+$ScriptVersion = "2.1.1"
 
 #Region Environment Validation
 
@@ -468,13 +475,6 @@ function Resolve-AndInstallComponent {
     $useLatest = [string]::IsNullOrWhiteSpace($RequestedVersion) -or $RequestedVersion -eq "latest"
     if ($useLatest) {
         $selected = $availableVersions[0]
-        if (-not $Force) {
-            Write-Host "`nLatest available $ComponentName`: $($selected.version)" -ForegroundColor Cyan
-            $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
-            if ($ans -notmatch 1) {
-                $selected = Read-VersionChoice -ComponentName $ComponentName -Versions $availableVersions
-            }
-        }
     }
     else {
         $selected = $availableVersions | Where-Object { $_.version -eq $RequestedVersion } | Select-Object -First 1
@@ -485,13 +485,37 @@ function Resolve-AndInstallComponent {
     }
     Write-Log -Message "Selected $ComponentName version: $($selected.version)" -Level "Info"
 
-    # --- Version comparison (skip if already up-to-date) ---
+    # --- Up-to-date check (runs BEFORE the install prompt so we never ask
+    # the user to install something they already have). Get-ComparableVersion
+    # strips any "-<Release>" suffix, so e.g. installed "0.1.285" is correctly
+    # recognised as equal to manifest "0.1.285-1". ---
     if (-not [string]::IsNullOrWhiteSpace($InstalledVersion)) {
         $installedComparable = Get-ComparableVersion -VersionString $InstalledVersion
         $availableComparable = Get-ComparableVersion -VersionString $selected.version
         if ($null -ne $installedComparable -and $null -ne $availableComparable -and $installedComparable -ge $availableComparable) {
-            Write-Log -Message "$ComponentName is already up-to-date (installed: $InstalledVersion). Skipping." -Level "Info"
+            Write-Log -Message "$ComponentName is already up-to-date (installed: $InstalledVersion, manifest: $($selected.version)). Skipping." -Level "Info"
             return
+        }
+    }
+
+    # --- Interactive "install latest?" prompt (only reached if an upgrade is actually available) ---
+    if ($useLatest -and -not $Force) {
+        Write-Host "`nLatest available $ComponentName`: $($selected.version)" -ForegroundColor Cyan
+        $ans = Read-YesNoChoice -Message "Install this version? (Y to confirm, N to pick from list)" -DefaultOption 1
+        if ($ans -notmatch 1) {
+            $selected = Read-VersionChoice -ComponentName $ComponentName -Versions $availableVersions
+            # Re-run the up-to-date check against the newly picked version so a
+            # user who picks an already-installed version from the list also
+            # gets the skip behaviour.
+            if (-not [string]::IsNullOrWhiteSpace($InstalledVersion)) {
+                $installedComparable = Get-ComparableVersion -VersionString $InstalledVersion
+                $availableComparable = Get-ComparableVersion -VersionString $selected.version
+                if ($null -ne $installedComparable -and $null -ne $availableComparable -and $installedComparable -ge $availableComparable) {
+                    Write-Log -Message "$ComponentName is already up-to-date (installed: $InstalledVersion, picked: $($selected.version)). Skipping." -Level "Info"
+                    return
+                }
+            }
+            Write-Log -Message "Selected $ComponentName version: $($selected.version)" -Level "Info"
         }
     }
 
