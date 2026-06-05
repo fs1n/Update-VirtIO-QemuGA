@@ -70,20 +70,6 @@
     Author      : Frederik S. (fs1n)
     License     : MIT License
     GitHub      : fs1n/Update-VirtIO-QemuGA
-    Changelog
-      2.1.1  UX fix: "install latest?" prompt no longer fires when the latest
-              available version is already installed — the up-to-date check
-              now runs first, so the script logs and skips. The check also
-              re-runs when a user picks an already-installed version from
-              the version list, and the skip log line now shows both the
-              installed and the manifest version for clarity.
-      2.1.0  Internal cleanup: extracted Resolve-AndInstallComponent helper
-              to dedupe the VirtIO and QEMU-GA flows, hardened error
-              handling, added parameter validation, ensured -Force implies
-              -AutoCleanup and -AutoReboot, fixed docstring examples and
-              typos.
-      2.0.0  Manifest-driven update flow for both VirtIO and QEMU Guest
-              Agent (overcomes the Anubis bot protection on fedorapeople.org).
 #>
 
 [CmdletBinding()]
@@ -99,7 +85,7 @@ param(
 )
 
 # Single source of truth for the script's own version. Mirrors the .NOTES block above.
-$ScriptVersion = "2.1.1"
+$ScriptVersion = "2.0.0"
 
 #Region Environment Validation
 
