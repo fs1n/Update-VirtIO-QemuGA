@@ -2,8 +2,15 @@ name: Mirror VirtIO & QEMU-GA from Fedora Archive
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 3 * * 0'   # Sundays at 03:00 UTC
   workflow_dispatch:
+
+# Prevent overlapping runs of this workflow from racing on the same
+# manifest commit. cancel-in-progress: false so a Sunday run that started
+# late is not killed by a manually-dispatched run that finishes first.
+concurrency:
+  group: mirror-virtio
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -12,10 +19,6 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
-    env:
-      KEEP_VERSIONS: "3"
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
 
@@ -33,39 +36,55 @@ jobs:
           npm install playwright
           npx playwright install chromium --with-deps
 
-      # Scrape fedorapeople.org and download the last 3 versions of VirtIO + QEMU-GA MSIs
-      - name: Scrape and download MSIs
+      # Restore cached browser profile so a previously solved Anubis cookie
+      # is already present — skips the PoW on warm runs.
+      - name: Restore browser profile cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.playwright-profile
+          key: playwright-profile-v1
+
+      # Scrape fedorapeople.org and merge into manifest.json with direct Fedora download URLs
+      - name: Generate manifest
         run: node .github/scripts/mirror-scrape.js
-
-      # Rename MSIs to include version in filename so all assets have unique names in the release.
-      # GitHub release assets are identified by basename only — uploading multiple files with the
-      # same name in one command causes HTTP 404 even with --clobber.
-      # Result: virtio-win-gt-x64.msi → virtio-win-gt-x64_0.1.285-1.msi, etc.
-      - name: Rename MSIs with version suffix
-        run: |
-          find mirror-out -name "*.msi" | while read f; do
-            version=$(basename "$(dirname "$f")")
-            dir=$(dirname "$f")
-            name=$(basename "$f" .msi)
-            mv "$f" "${dir}/${name}_${version}.msi"
-          done
-
-      # Upload all MSIs and the manifest, replacing existing assets with --clobber
-      - name: Upload assets to mirror-latest
-        run: |
-          FILES=$(find mirror-out -name "*.msi" -o -name "manifest.json" | tr '\n' ' ')
-          gh release upload "mirror-latest" $FILES --clobber
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BROWSER_PROFILE_DIR: /home/runner/.playwright-profile
+
+      # Commit manifest.json to main so the PS1 script can fetch it directly.
+      # The scraper already preserves old entries on merge, but we still guard
+      # here against: (a) the scraper crashing before writing anything, and
+      # (b) a corrupt/empty manifest being committed.
+      - name: Commit manifest to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f manifest.json ] && jq -e '.virtio | length > 0 and .qemu_ga | length > 0' manifest.json > /dev/null; then
+            git add manifest.json
+            git diff --staged --quiet || git commit -m "chore: update manifest.json [skip ci]"
+            git push
+          else
+            echo "::warning::manifest.json missing or empty — manifest not updated"
+          fi
 
       - name: Write job summary
         if: always()
         run: |
-          echo "## Mirror Run $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
-          if [ -f mirror-out/manifest.json ]; then
-            echo '```json' >> $GITHUB_STEP_SUMMARY
-            cat mirror-out/manifest.json >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "manifest.json not found — scraping may have failed" >> $GITHUB_STEP_SUMMARY
-          fi
+          {
+            echo "## Mirror run — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            if [ -f manifest.json ] && jq -e '.virtio | length > 0 and .qemu_ga | length > 0' manifest.json > /dev/null; then
+              echo "- **Generated:** $(jq -r '.generated' manifest.json)"
+              echo "- **VirtIO versions:** $(jq '.virtio | length' manifest.json)"
+              echo "- **QEMU-GA versions:** $(jq '.qemu_ga | length' manifest.json)"
+              echo ""
+              echo "<details><summary>Full manifest.json</summary>"
+              echo ""
+              echo '```json'
+              cat manifest.json
+              echo '```'
+              echo ""
+              echo "</details>"
+            else
+              echo "::warning::manifest.json missing or empty — nothing to commit."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

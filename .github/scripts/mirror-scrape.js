@@ -1,55 +1,96 @@
 /**
  * mirror-scrape.js
  * Scrapes fedorapeople.org (Anubis-protected) via Playwright Chromium,
- * extracts the latest N versions of VirtIO and QEMU-GA,
- * downloads the MSIs and writes a manifest.json.
+ * finds ALL versions of VirtIO and QEMU-GA, and MERGES them into
+ * manifest.json so old entries are preserved if a scrape only sees
+ * a subset of versions.
  *
- * Output: ./mirror-out/<component>/<version>/<file>.msi
+ * Output: ./manifest.json
+ *
+ * Set BROWSER_PROFILE_DIR to a persistent path so Anubis cookies survive
+ * between runs (paired with actions/cache in the workflow).
+ *
+ * Behaviour:
+ *  - If the scrape itself fails (all retries exhausted on an index page),
+ *    nothing is written and the process exits non-zero.
+ *  - If the scrape succeeds but a component yields 0 versions, that
+ *    component is not touched in the manifest.
+ *  - For each component, new entries replace existing ones with the same
+ *    version, and existing entries with versions not seen this run are
+ *    preserved (so older versions don't disappear when the front page
+ *    cycles them off).
  */
 
 const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
-const https = require('https');
-const http  = require('http');
 
 // ── Config ────────────────────────────────────────────────────────────────
-const KEEP_VERSIONS  = parseInt(process.env.KEEP_VERSIONS || '3', 10);
-const OUT_DIR        = path.resolve('./mirror-out');
 const FPA_BASE       = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads';
 const VIRTIO_ARCHIVE = `${FPA_BASE}/archive-virtio/`;
 const QEMUGA_ARCHIVE = `${FPA_BASE}/archive-qemu-ga/`;
 
-const VIRTIO_MSI     = 'virtio-win-gt-x64.msi';
+// VirtIO MSI filename is stable across all archive versions.
+const VIRTIO_MSI            = 'virtio-win-gt-x64.msi';
+// QEMU-GA changed filename at some point; check both candidates per directory.
 const QEMUGA_MSI_CANDIDATES = ['qemu-ga-x86_64.msi', 'qemu-ga-x64.msi'];
+
+const PROFILE_DIR   = process.env.BROWSER_PROFILE_DIR || '/tmp/playwright-profile';
+const MANIFEST_PATH = path.resolve('./manifest.json');
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
-}
-
 /**
- * Navigates to a URL with Playwright and waits until the Anubis challenge
- * is resolved (indicated by the actual page content being loaded).
- * Returns the complete HTML body.
+ * Navigates to a URL with Playwright, waits for the Anubis PoW challenge
+ * to resolve, and validates that real directory-listing content loaded.
+ * Retries up to 3 times before throwing.
  */
-async function fetchWithBrowser(page, url, waitSelector = 'body', timeout = 30000) {
-  console.log(`  [browser] → ${url}`);
-  await page.goto(url, { waitUntil: 'networkidle', timeout });
+async function fetchWithBrowser(page, url, timeout = 60000) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      console.log(`  [browser] retry ${attempt}/3 → ${url}`);
+      await new Promise(r => setTimeout(r, 3000 * (attempt - 1)));
+    } else {
+      console.log(`  [browser] → ${url}`);
+    }
 
-  // Anubis shows a "Checking your browser" text while the PoW is running.
-  // We wait until this text is gone and actual content is present.
-  try {
-    await page.waitForFunction(
-      () => !document.body.innerText.includes('Checking your browser'),
-      { timeout }
-    );
-  } catch {
-    // If no Anubis check, just continue
+    try {
+      await page.goto(url, { waitUntil: 'networkidle', timeout });
+
+      // Anubis shows "Checking your browser" while the PoW runs.
+      // Wait until that text is gone.
+      try {
+        await page.waitForFunction(
+          () => !document.body.innerText.includes('Checking your browser'),
+          { timeout }
+        );
+      } catch {
+        // No Anubis challenge active, or already cleared — continue.
+      }
+
+      // Brief pause so any post-challenge redirect can complete,
+      // then re-confirm network is idle.
+      await page.waitForTimeout(1500);
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+      const html  = await page.content();
+      const links = [...html.matchAll(/href="([^"]+)"/gi)].map(m => m[1]);
+
+      // A real directory listing always has several links.
+      // Fewer than 3 means we likely got challenge/error HTML.
+      if (links.length < 3) {
+        console.warn(`  [browser] only ${links.length} link(s) found — challenge page? retrying...`);
+        continue;
+      }
+
+      console.log(`  [browser] ✓ ${links.length} links found`);
+      return html;
+    } catch (err) {
+      console.warn(`  [browser] attempt ${attempt} error: ${err.message}`);
+      if (attempt === 3) throw err;
+    }
   }
-
-  return page.content();
+  throw new Error(`fetchWithBrowser: all retries exhausted for ${url}`);
 }
 
 /**
@@ -70,128 +111,144 @@ function hrefBasename(href) {
 }
 
 /**
- * Downloads a file via HTTP(S). Follows redirects.
- * Playwright cookies are provided as headers so
- * the download is not blocked again.
+ * Sorts VirtIO version strings ("0.1.285-1", "0.1.262-2", ...) descending
+ * using proper numeric component comparison.
  */
-async function downloadFile(url, destPath, cookies = []) {
-  return new Promise((resolve, reject) => {
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-    const options = {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-        ...(cookieHeader ? { Cookie: cookieHeader } : {})
-      }
-    };
-
-    const get = url.startsWith('https') ? https.get : http.get;
-
-    function doGet(targetUrl) {
-      get(targetUrl, options, res => {
-        // Follow redirects
-        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-          return doGet(res.headers.location);
-        }
-        if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode} for ${targetUrl}`));
-        }
-
-        const total = parseInt(res.headers['content-length'] || '0', 10);
-        let received = 0;
-        let lastPct  = -1;
-
-        const file = fs.createWriteStream(destPath);
-        res.on('data', chunk => {
-          received += chunk.length;
-          if (total > 0) {
-            const pct = Math.floor((received / total) * 100);
-            if (pct !== lastPct && pct % 10 === 0) {
-              process.stdout.write(`\r    ${pct}% (${(received/1024/1024).toFixed(1)} / ${(total/1024/1024).toFixed(1)} MB)`);
-              lastPct = pct;
-            }
-          }
-        });
-        res.pipe(file);
-        file.on('finish', () => { process.stdout.write('\n'); file.close(resolve); });
-        file.on('error', reject);
-      }).on('error', reject);
+function sortVirtioDesc(arr) {
+  return [...arr].sort((a, b) => {
+    const va = a.version.replace('-', '.').split('.').map(Number);
+    const vb = b.version.replace('-', '.').split('.').map(Number);
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+      const diff = (vb[i] || 0) - (va[i] || 0);
+      if (diff !== 0) return diff;
     }
-
-    doGet(url);
+    return 0;
   });
+}
+
+/**
+ * Sorts QEMU-GA version strings ("110.0.2-1", "7.0-10", ...) descending
+ * using proper numeric component comparison.
+ */
+function sortQemuGaDesc(arr) {
+  return [...arr].sort((a, b) => {
+    const [av, arRaw] = a.version.split('-');
+    const [bv, brRaw] = b.version.split('-');
+    const va = av.split('.').map(Number);
+    const vb = bv.split('.').map(Number);
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+      const diff = (vb[i] || 0) - (va[i] || 0);
+      if (diff !== 0) return diff;
+    }
+    return (parseInt(brRaw, 10) || 0) - (parseInt(arRaw, 10) || 0);
+  });
+}
+
+/**
+ * Reads the existing manifest (if any) and returns a sane default on
+ * missing/unreadable/unparseable input. Never throws.
+ */
+async function loadExistingManifest() {
+  try {
+    const raw = await fs.promises.readFile(MANIFEST_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      generated: typeof parsed.generated === 'string' ? parsed.generated : null,
+      virtio:    Array.isArray(parsed.virtio)    ? parsed.virtio    : [],
+      qemu_ga:   Array.isArray(parsed.qemu_ga)   ? parsed.qemu_ga   : [],
+    };
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn(`[merge] could not read existing manifest (${err.message}) — starting from empty`);
+    } else {
+      console.log('[merge] no existing manifest — starting from empty');
+    }
+    return { generated: null, virtio: [], qemu_ga: [] };
+  }
+}
+
+/**
+ * Merges `fresh` into `existing` for a single component, keyed by
+ * `version` (last-write-wins from `fresh`). Returns the merged array
+ * sorted by `sorter`.
+ */
+function mergeByVersion(existing, fresh, sorter) {
+  const byVersion = new Map();
+  for (const entry of existing) {
+    if (entry && typeof entry.version === 'string') {
+      byVersion.set(entry.version, entry);
+    }
+  }
+  for (const entry of fresh) {
+    if (entry && typeof entry.version === 'string') {
+      byVersion.set(entry.version, entry);  // fresh wins
+    }
+  }
+  return sorter([...byVersion.values()]);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
 
 (async () => {
-  ensureDir(OUT_DIR);
-  const manifest = { generated: new Date().toISOString(), virtio: [], qemu_ga: [] };
+  const existing = await loadExistingManifest();
+  console.log(`[merge] existing manifest: ${existing.virtio.length} VirtIO, ${existing.qemu_ga.length} QEMU-GA`);
 
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36'
+  // Fresh lists from the current scrape. Start empty so a thrown scraper
+  // never partially overwrites the on-disk manifest.
+  let freshVirtio  = [];
+  let freshQemuGa  = [];
+
+  // launchPersistentContext stores cookies/localStorage in PROFILE_DIR so
+  // a solved Anubis PoW cookie survives across workflow runs (via actions/cache).
+  // --disable-blink-features=AutomationControlled removes the automation flag
+  // that bot-detection systems read via navigator.webdriver.
+  const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+    headless: true,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+    args: ['--disable-blink-features=AutomationControlled'],
   });
+
+  // Hide the remaining webdriver signal that the args flag alone doesn't cover.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+
   const page = await context.newPage();
 
   try {
     // ── VirtIO ─────────────────────────────────────────────────────────
+    // We know VIRTIO_MSI is stable, so we only need the archive index —
+    // no per-version directory fetch required.
     console.log('\n=== VirtIO ===');
     const virtioIndexHtml = await fetchWithBrowser(page, VIRTIO_ARCHIVE);
     const virtioLinks = extractLinks(virtioIndexHtml)
-      .filter(h => /^virtio-win-[\d.]+-\d+$/.test(hrefBasename(h)));
+      .filter(h => /^virtio-win-[\d.]+-\d+/.test(hrefBasename(h)));
+
+    console.log(`  Raw folder matches: ${virtioLinks.length}`);
 
     const virtioVersions = virtioLinks
       .map(href => {
         const basename = hrefBasename(href);
-        const m = basename.match(/virtio-win-([\d.]+-\d+)/);
+        const m = basename.match(/^virtio-win-([\d.]+-\d+)/);
         return m ? { basename, version: m[1] } : null;
       })
-      .filter(Boolean)
-      .sort((a, b) => {
-        const va = a.version.replace('-', '.').split('.').map(Number);
-        const vb = b.version.replace('-', '.').split('.').map(Number);
-        for (let i = 0; i < Math.max(va.length, vb.length); i++) {
-          const diff = (vb[i] || 0) - (va[i] || 0);
-          if (diff !== 0) return diff;
-        }
-        return 0;
-      })
-      .slice(0, KEEP_VERSIONS);
+      .filter(Boolean);
 
-    console.log(`  Found (top ${KEEP_VERSIONS}):`, virtioVersions.map(v => v.version));
+    console.log(`  Versions found (${virtioVersions.length}):`, virtioVersions.map(v => v.version).join(', '));
 
     for (const v of virtioVersions) {
-      const dirUrl  = `${VIRTIO_ARCHIVE}${v.basename}/`;
-      const dirHtml = await fetchWithBrowser(page, dirUrl);
-      const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
-
-      if (!fileBasenames.includes(VIRTIO_MSI)) {
-        console.warn(` ${VIRTIO_MSI} not found in ${dirUrl}, skipping.`);
-        continue;
-      }
-
-      const msiUrl  = `${dirUrl}${VIRTIO_MSI}`;
-      const destDir = path.join(OUT_DIR, 'virtio', v.version);
-      const destFile = path.join(destDir, VIRTIO_MSI);
-      ensureDir(destDir);
-
-      if (fs.existsSync(destFile)) {
-        console.log(`  ✓ already present: ${v.version}/${VIRTIO_MSI}`);
-      } else {
-        console.log(`  ↓ Downloading ${v.version}/${VIRTIO_MSI} ...`);
-        const cookies = await context.cookies();
-        await downloadFile(msiUrl, destFile, cookies);
-        console.log(`  ✓ ${v.version}/${VIRTIO_MSI}`);
-      }
-
-      manifest.virtio.push({ version: v.version, file: VIRTIO_MSI, url: msiUrl });
+      const msiUrl = `${VIRTIO_ARCHIVE}${v.basename}/${VIRTIO_MSI}`;
+      freshVirtio.push({ version: v.version, file: VIRTIO_MSI, url: msiUrl });
     }
 
     // ── QEMU-GA ────────────────────────────────────────────────────────
+    // Filename changed between old and new versions, so we check each directory.
     console.log('\n=== QEMU Guest Agent ===');
     const qemuIndexHtml = await fetchWithBrowser(page, QEMUGA_ARCHIVE);
     const qemuLinks = extractLinks(qemuIndexHtml)
       .filter(h => /^qemu-ga-win-[\d.]+-\d+/.test(hrefBasename(h)));
+
+    console.log(`  Raw folder matches: ${qemuLinks.length}`);
 
     const qemuVersions = qemuLinks
       .map(href => {
@@ -199,23 +256,13 @@ async function downloadFile(url, destPath, cookies = []) {
         const m = basename.match(/^qemu-ga-win-([\d.]+)-(\d+)/);
         return m ? { basename, version: m[1], release: parseInt(m[2], 10) } : null;
       })
-      .filter(Boolean)
-      .sort((a, b) => {
-        const va = a.version.split('.').map(Number);
-        const vb = b.version.split('.').map(Number);
-        for (let i = 0; i < Math.max(va.length, vb.length); i++) {
-          const diff = (vb[i] || 0) - (va[i] || 0);
-          if (diff !== 0) return diff;
-        }
-        return b.release - a.release;
-      })
-      .slice(0, KEEP_VERSIONS);
+      .filter(Boolean);
 
-    console.log(`  Found (top ${KEEP_VERSIONS}):`, qemuVersions.map(v => `${v.version}-${v.release}`));
+    console.log(`  Versions found (${qemuVersions.length}):`, qemuVersions.map(v => `${v.version}-${v.release}`).join(', '));
 
     for (const v of qemuVersions) {
-      const dirUrl  = `${QEMUGA_ARCHIVE}${v.basename}/`;
-      const dirHtml = await fetchWithBrowser(page, dirUrl);
+      const dirUrl        = `${QEMUGA_ARCHIVE}${v.basename}/`;
+      const dirHtml       = await fetchWithBrowser(page, dirUrl);
       const fileBasenames = extractLinks(dirHtml).map(hrefBasename);
 
       let msiFile = null;
@@ -224,34 +271,44 @@ async function downloadFile(url, destPath, cookies = []) {
       }
 
       if (!msiFile) {
-        console.warn(` No matching MSI candidate in ${dirUrl}, skipping.`);
+        console.warn(`  skipping ${v.basename}: no known MSI candidate found`);
         continue;
       }
 
-      const msiUrl   = `${dirUrl}${msiFile}`;
-      const verTag   = `${v.version}-${v.release}`;
-      const destDir  = path.join(OUT_DIR, 'qemu-ga', verTag);
-      const destFile = path.join(destDir, msiFile);
-      ensureDir(destDir);
-
-      if (fs.existsSync(destFile)) {
-        console.log(`  ✓ already present: ${verTag}/${msiFile}`);
-      } else {
-        console.log(`  ↓ Downloading ${verTag}/${msiFile} ...`);
-        const cookies = await context.cookies();
-        await downloadFile(msiUrl, destFile, cookies);
-        console.log(`  ✓ ${verTag}/${msiFile}`);
-      }
-
-      manifest['qemu_ga'].push({ version: verTag, file: msiFile, url: msiUrl });
+      const msiUrl = `${dirUrl}${msiFile}`;
+      const verTag = `${v.version}-${v.release}`;
+      console.log(`  ✓ ${verTag}/${msiFile}`);
+      freshQemuGa.push({ version: verTag, file: msiFile, url: msiUrl });
     }
 
   } finally {
-    await browser.close();
+    await context.close();
   }
 
-  // ── Write manifest ──────────────────────────────────────────────
-  const manifestPath = path.join(OUT_DIR, 'manifest.json');
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  console.log(`\n manifest.json written:\n${JSON.stringify(manifest, null, 2)}`);
+  // ── Safety gates before writing ──────────────────────────────────────
+  // Hard requirement: each component that returned a usable list must be
+  // non-empty. We never want to nuke the manifest because the site 5xx'd.
+  if (freshVirtio.length === 0) {
+    console.error('[merge] no VirtIO versions found this run — manifest NOT written');
+    process.exit(2);
+  }
+  if (freshQemuGa.length === 0) {
+    console.error('[merge] no QEMU-GA versions found this run — manifest NOT written');
+    process.exit(2);
+  }
+
+  const mergedVirtio = mergeByVersion(existing.virtio, freshVirtio, sortVirtioDesc);
+  const mergedQemuGa = mergeByVersion(existing.qemu_ga, freshQemuGa, sortQemuGaDesc);
+
+  const manifest = {
+    generated: new Date().toISOString(),
+    virtio:    mergedVirtio,
+    qemu_ga:   mergedQemuGa,
+  };
+
+  await fs.promises.writeFile(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+
+  const addedVirtio = mergedVirtio.length - existing.virtio.length;
+  const addedQemuGa = mergedQemuGa.length - existing.qemu_ga.length;
+  console.log(`\n[merge] manifest written: ${mergedVirtio.length} VirtIO (${addedVirtio >= 0 ? '+' : ''}${addedVirtio}), ${mergedQemuGa.length} QEMU-GA (${addedQemuGa >= 0 ? '+' : ''}${addedQemuGa})`);
 })();

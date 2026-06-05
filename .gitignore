@@ -1,5 +1,6 @@
 *.log
-mirror-out/
 node_modules/
+.claude/
 package-lock.json
 package.json
+.DS_Store
