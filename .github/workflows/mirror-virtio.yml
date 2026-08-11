@@ -2,7 +2,7 @@ name: Mirror VirtIO & QEMU-GA from Fedora Archive
 
 on:
   schedule:
-    - cron: '0 3 * * 0'   # Sundays at 03:00 UTC
+    - cron: '0 3 1 * *'   # Sundays at 03:00 UTC
   workflow_dispatch:
 
 # Prevent overlapping runs of this workflow from racing on the same
